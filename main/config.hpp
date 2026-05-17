@@ -70,6 +70,7 @@ constexpr std::uint16_t kHeightPx       = 64;
 // 0 = normal, 1 = 90° CW, 2 = 180°, 3 = 270° CW.
 constexpr std::uint8_t  kRotationQuadrants = 2;
 constexpr std::uint32_t kRefreshPeriodMs   = 200;
+constexpr std::uint32_t kSplashDurationMs  = 2000;
 constexpr std::uint32_t kTaskStackBytes    = 4096;
 constexpr std::uint32_t kTaskPriority      = 4;
 constexpr std::int32_t  kTaskCore          = 1;

@@ -100,6 +100,10 @@ void display_task(void* arg) {
     auto* display = static_cast<espid::ssd1306::Ssd1306Display*>(arg);
     ESP_LOGI(kTag, "display_task: running on core %d", xPortGetCoreID());
 
+    // Hold the boot splash painted by app_main for the configured budget
+    // so the user gets to see firmware identity at power-on.
+    vTaskDelay(pdMS_TO_TICKS(cfg::oled::kSplashDurationMs));
+
     char big[16];
     char small[24];
 
@@ -223,6 +227,20 @@ extern "C" void app_main(void) {
         // OLED is non-critical: continue without it.
         ESP_LOGW(kTag, "OLED init failed: %s - continuing headless",
                  espid::hal_cpp::to_string(ds.error()));
+    } else {
+        // Boot splash: shown until sensor_task publishes the first sample
+        // or kSplashDurationMs elapses, whichever comes first.  Renders
+        // banner + firmware version centred on the panel.
+        char ver[16];
+        std::snprintf(ver, sizeof(ver), "v%u.%u.%u",
+                      static_cast<unsigned>(cfg::kFwVersionMajor),
+                      static_cast<unsigned>(cfg::kFwVersionMinor),
+                      static_cast<unsigned>(cfg::kFwVersionPatch));
+        display.clear();
+        display.draw_text(8,  28, espid::hal_cpp::Font::kLarge,
+                          cfg::kFirmwareName);
+        display.draw_text(32, 50, espid::hal_cpp::Font::kSmall, ver);
+        (void)display.flush();
     }
 
     static SensorTaskCtx ctx{&driver, &decoder};
