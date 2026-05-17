@@ -16,27 +16,47 @@ namespace {
 
 constexpr const char* kTag = "tsic306_drv";
 
-// Decide bit value from a single RMT symbol (one bit period).
-// '0' bit: line stays LOW longer than HIGH.
-// '1' bit: line stays LOW shorter than HIGH.
-inline std::uint8_t bit_from_symbol(const rmt_symbol_word_t& s) noexcept {
-    return (s.duration0 < s.duration1) ? 1U : 0U;
+// Decide bit value by comparing the LOW portion of one bit period against an
+// adaptive threshold derived from the start bit. We deliberately do NOT use
+// the symbol's HIGH portion: the last symbol of each packet has its
+// `duration1` inflated by either the inter-packet idle (packet 1) or the
+// end-of-frame idle (packet 2), which flips the naïve low-vs-high decision
+// roughly 50 % of the time and would manifest as a parity failure.
+//
+// ZACwire timing (TSIC 306, t_strobe ≈ 31 µs, bit period = 4·t_strobe):
+//   '0' bit: LOW for ~3·t_strobe (≈93 µs)
+//   '1' bit: LOW for ~1·t_strobe (≈31 µs)
+//
+// The start bit is always '0', so its `duration0` is the long-low reference;
+// `2/3 × duration0` sits midway between the '0' and '1' low-times and is a
+// robust per-packet threshold.
+inline std::uint8_t bit_from_low(std::uint16_t low, std::uint16_t threshold) noexcept {
+    return (low < threshold) ? 1U : 0U;
 }
 
 // Parse 10 consecutive RMT symbols (start + 8 data + parity, MSB-first).
-// Returns the 8 data bits as a byte, or -1 if start bit != 0 or parity fails.
+// Returns the 8 data bits as a byte, or -1 if start bit fails its sanity
+// check or even parity is wrong.
 int parse_packet(const rmt_symbol_word_t* syms) noexcept {
-    if (bit_from_symbol(syms[0]) != 0U) {
-        return -1;  // start bit must be 0
+    const std::uint16_t low_start = syms[0].duration0;
+    // Reject garbage: start bit's low must be at least ~2·t_strobe (60 µs).
+    if (low_start < 50U) {
+        return -1;
+    }
+    const std::uint16_t threshold = static_cast<std::uint16_t>((low_start * 2U) / 3U);
+    // Sanity-check that the start bit reads as '0' under the same rule
+    // (low_start should be well above threshold by construction).
+    if (bit_from_low(low_start, threshold) != 0U) {
+        return -1;
     }
     std::uint8_t data   = 0;
     std::uint8_t parity = 0;
     for (int i = 0; i < 8; ++i) {
-        const std::uint8_t b = bit_from_symbol(syms[1 + i]);
+        const std::uint8_t b = bit_from_low(syms[1 + i].duration0, threshold);
         data    = static_cast<std::uint8_t>((data << 1) | b);
         parity ^= b;
     }
-    const std::uint8_t parity_bit = bit_from_symbol(syms[9]);
+    const std::uint8_t parity_bit = bit_from_low(syms[9].duration0, threshold);
     if (parity_bit != parity) {
         return -1;  // even-parity mismatch
     }
