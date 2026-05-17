@@ -1,0 +1,11 @@
+## Component manager manifest for components/ssd1306.
+##
+## Pulls in `nixy4/u8g2` from the ESP Component Registry, which bundles
+## the upstream u8g2 graphics library together with an ESP-IDF-native
+## hardware I2C port (`u8x8_byte_esp32_hw_i2c` + `..._gpio_and_delay`).
+## We only need the I2C path for the SSD1306 OLED at this stage.
+dependencies:
+  idf:
+    version: ">=5.0"
+  nixy4/u8g2:
+    version: "^0.1.4"
