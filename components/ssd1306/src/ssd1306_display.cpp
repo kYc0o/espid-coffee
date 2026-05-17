@@ -65,8 +65,17 @@ hal_cpp::Status Ssd1306Display::init(const Config& cfg) noexcept {
         return hal_cpp::Status(hal_cpp::Error::kBusError);
     }
 
+    const u8g2_cb_t* rotation_cb = U8G2_R0;
+    switch (cfg_.rotation) {
+        case Rotation::k90:  rotation_cb = U8G2_R1; break;
+        case Rotation::k180: rotation_cb = U8G2_R2; break;
+        case Rotation::k270: rotation_cb = U8G2_R3; break;
+        case Rotation::k0:
+        default:             rotation_cb = U8G2_R0; break;
+    }
+
     u8g2_Setup_ssd1306_i2c_128x64_noname_f(
-        &u8g2_, U8G2_R0,
+        &u8g2_, rotation_cb,
         u8x8_byte_esp32_hw_i2c,
         u8x8_gpio_and_delay_esp32_i2c);
 

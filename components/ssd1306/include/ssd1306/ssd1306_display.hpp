@@ -25,6 +25,15 @@ namespace espid::ssd1306 {
 
 class Ssd1306Display final : public hal_cpp::IDisplay {
    public:
+    // Panel orientation. SSD1306 modules vary in how they sit on a
+    // breadboard; flip in software rather than re-wiring.
+    enum class Rotation : std::uint8_t {
+        k0   = 0,   // native (U8G2_R0)
+        k90  = 1,   // 90° clockwise
+        k180 = 2,   // upside down
+        k270 = 3,   // 270° clockwise
+    };
+
     struct Config {
         int           i2c_port      = 0;
         gpio_num_t    sda           = GPIO_NUM_8;
@@ -35,6 +44,7 @@ class Ssd1306Display final : public hal_cpp::IDisplay {
         // dedicated reset pin" (most generic 0.96" modules tie /RES
         // internally).
         gpio_num_t    reset_pin     = GPIO_NUM_NC;
+        Rotation      rotation      = Rotation::k0;
     };
 
     // Panel dimensions for the 128x64 SSD1306 variant we set up.
