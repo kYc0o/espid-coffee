@@ -13,6 +13,7 @@
 
 #include "brew/brew_button.hpp"
 #include "brew/shot_timer.hpp"
+#include "config.hpp"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -26,26 +27,19 @@
 
 namespace {
 
-constexpr const char* kTag = "espid";
+namespace cfg = espid::config;
 
-// ZACwire data line. Verify against your wiring; GPIO 1 is the project
-// default on the ESP32-S3 N16R8.
-constexpr gpio_num_t     kTsicGpio       = GPIO_NUM_1;
-constexpr std::uint32_t  kFrameTimeoutMs = 500;
+constexpr const char* kTag = cfg::kLogTag;
 
-// OLED I2C bus.  ESP32-S3 default I2C pins keep GPIO 0/2 free for
-// strapping / future use.
-constexpr gpio_num_t    kOledSda         = GPIO_NUM_8;
-constexpr gpio_num_t    kOledScl         = GPIO_NUM_9;
-constexpr std::uint8_t  kOledAddr7bit    = 0x3C;
-constexpr std::uint32_t kDisplayPeriodMs = 200;  // ~5 Hz refresh.
-
-// Brew button.  Active-low, normally pulled high by an external RC +
-// Schmitt-trigger debounce circuit; we still enable the internal
-// pull-up as a fallback and apply a short software debounce on top.
-constexpr gpio_num_t    kBrewBtnGpio     = GPIO_NUM_5;
-constexpr std::uint32_t kButtonPeriodMs  = 10;
-constexpr std::uint32_t kButtonDebounceMs = 10;
+espid::ssd1306::Ssd1306Display::Rotation oled_rotation() {
+    using R = espid::ssd1306::Ssd1306Display::Rotation;
+    switch (cfg::oled::kRotationQuadrants & 0x3) {
+        case 1:  return R::k90;
+        case 2:  return R::k180;
+        case 3:  return R::k270;
+        default: return R::k0;
+    }
+}
 
 // Atomic snapshot published by sensor_task and consumed by display_task.
 // 32-bit values on ESP32-S3 are naturally aligned/atomic, so no spinlock
@@ -77,7 +71,7 @@ void sensor_task(void* arg) {
     ESP_LOGI(kTag, "sensor_task: running on core %d", xPortGetCoreID());
 
     for (;;) {
-        const auto fr = ctx->driver->next_frame(kFrameTimeoutMs);
+        const auto fr = ctx->driver->next_frame(cfg::tsic::kFrameTimeoutMs);
         if (!fr.ok()) {
             ESP_LOGW(kTag, "capture error: %s",
                      espid::hal_cpp::to_string(fr.error()));
@@ -146,7 +140,7 @@ void display_task(void* arg) {
         }
         (void)display->flush();
 
-        vTaskDelay(pdMS_TO_TICKS(kDisplayPeriodMs));
+        vTaskDelay(pdMS_TO_TICKS(cfg::oled::kRefreshPeriodMs));
     }
 }
 
@@ -156,16 +150,16 @@ void display_task(void* arg) {
 // edge-triggered so a quick tap starts it and another tap stops it).
 void button_task(void* /*arg*/) {
     ESP_LOGI(kTag, "button_task: running on core %d (gpio=%d)",
-             xPortGetCoreID(), static_cast<int>(kBrewBtnGpio));
+             xPortGetCoreID(), static_cast<int>(cfg::brew::kButtonGpio));
 
     espid::brew::BrewButton::Config bcfg{};
-    bcfg.active_low  = true;
-    bcfg.debounce_ms = kButtonDebounceMs;
+    bcfg.active_low  = cfg::brew::kButtonActiveLow;
+    bcfg.debounce_ms = cfg::brew::kDebounceMs;
     espid::brew::BrewButton btn(bcfg);
     espid::brew::ShotTimer  timer;
 
     for (;;) {
-        const int           raw    = gpio_get_level(kBrewBtnGpio);
+        const int           raw    = gpio_get_level(cfg::brew::kButtonGpio);
         const std::uint64_t now_ms = static_cast<std::uint64_t>(
             esp_timer_get_time() / 1000);
 
@@ -186,21 +180,26 @@ void button_task(void* /*arg*/) {
                                 std::memory_order_relaxed);
         g_shot.running.store(timer.running(), std::memory_order_relaxed);
 
-        vTaskDelay(pdMS_TO_TICKS(kButtonPeriodMs));
+        vTaskDelay(pdMS_TO_TICKS(cfg::brew::kPollPeriodMs));
     }
 }
 
 }  // namespace
 
 extern "C" void app_main(void) {
-    ESP_LOGI(kTag, "boot OK - ESPID-Coffee v0.0.4");
+    ESP_LOGI(kTag, "boot OK - %s v%u.%u.%u (%s)",
+             cfg::kFirmwareName,
+             static_cast<unsigned>(cfg::kFwVersionMajor),
+             static_cast<unsigned>(cfg::kFwVersionMinor),
+             static_cast<unsigned>(cfg::kFwVersionPatch),
+             cfg::kFwBranch);
     ESP_LOGI(kTag, "target=esp32s3 flash=16MB psram=octal/80MHz");
 
     static espid::tsic306::Tsic306Driver  driver;
     static espid::tsic306::Tsic306Decoder decoder;
     static espid::ssd1306::Ssd1306Display display;
 
-    const espid::tsic306::Tsic306Driver::Config drv_cfg{kTsicGpio, 0};
+    const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
     if (!s.ok()) {
         ESP_LOGE(kTag, "TSIC driver init failed: %s - halting",
@@ -211,13 +210,13 @@ extern "C" void app_main(void) {
     }
 
     const espid::ssd1306::Ssd1306Display::Config dsp_cfg{
-        /* i2c_port      */ 0,
-        /* sda           */ kOledSda,
-        /* scl           */ kOledScl,
-        /* clk_hz        */ 400'000U,
-        /* dev_addr_7bit */ kOledAddr7bit,
+        /* i2c_port      */ cfg::oled::kI2cBusNum,
+        /* sda           */ cfg::oled::kSdaGpio,
+        /* scl           */ cfg::oled::kSclGpio,
+        /* clk_hz        */ cfg::oled::kI2cFreqHz,
+        /* dev_addr_7bit */ cfg::oled::kI2cAddr7bit,
         /* reset_pin     */ GPIO_NUM_NC,
-        /* rotation      */ espid::ssd1306::Ssd1306Display::Rotation::k180,
+        /* rotation      */ oled_rotation(),
     };
     const auto ds = display.init(dsp_cfg);
     if (!ds.ok()) {
@@ -228,7 +227,8 @@ extern "C" void app_main(void) {
 
     static SensorTaskCtx ctx{&driver, &decoder};
     BaseType_t           ok = xTaskCreatePinnedToCore(
-        &sensor_task, "sensor", 4096, &ctx, 5, nullptr, 1);
+        &sensor_task, "sensor", cfg::tsic::kTaskStackBytes, &ctx,
+        cfg::tsic::kTaskPriority, nullptr, cfg::tsic::kTaskCore);
     if (ok != pdPASS) {
         ESP_LOGE(kTag, "sensor_task create failed - halting");
         for (;;) {
@@ -238,19 +238,21 @@ extern "C" void app_main(void) {
 
     if (ds.ok()) {
         ok = xTaskCreatePinnedToCore(
-            &display_task, "display", 4096, &display, 4, nullptr, 1);
+            &display_task, "display", cfg::oled::kTaskStackBytes, &display,
+            cfg::oled::kTaskPriority, nullptr, cfg::oled::kTaskCore);
         if (ok != pdPASS) {
             ESP_LOGW(kTag, "display_task create failed - continuing without UI");
         }
     }
 
-    // Brew button on kBrewBtnGpio.  Hardware debounce + internal pull-up
-    // fallback; software debounce kButtonDebounceMs.
-    {
+    // Brew button.  Hardware debounce + internal pull-up fallback;
+    // software debounce per cfg::brew::kDebounceMs.
+    if (cfg::brew::kEnabled) {
         gpio_config_t bcfg{};
-        bcfg.pin_bit_mask = 1ULL << static_cast<int>(kBrewBtnGpio);
+        bcfg.pin_bit_mask = 1ULL << static_cast<int>(cfg::brew::kButtonGpio);
         bcfg.mode         = GPIO_MODE_INPUT;
-        bcfg.pull_up_en   = GPIO_PULLUP_ENABLE;
+        bcfg.pull_up_en   = cfg::brew::kButtonPullupEnable
+                                ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
         bcfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
         bcfg.intr_type    = GPIO_INTR_DISABLE;
         const esp_err_t err = gpio_config(&bcfg);
@@ -259,7 +261,8 @@ extern "C" void app_main(void) {
                      esp_err_to_name(err));
         } else {
             ok = xTaskCreatePinnedToCore(
-                &button_task, "button", 3072, nullptr, 3, nullptr, 1);
+                &button_task, "button", cfg::brew::kTaskStackBytes, nullptr,
+                cfg::brew::kTaskPriority, nullptr, cfg::brew::kTaskCore);
             if (ok != pdPASS) {
                 ESP_LOGW(kTag, "button_task create failed - no brew control");
             }
