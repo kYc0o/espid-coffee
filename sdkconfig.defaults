@@ -1,0 +1,35 @@
+# ESPID-Coffee default sdkconfig — checked in for reproducibility.
+# Per-developer overrides live in sdkconfig.defaults.local (gitignored).
+
+# ---------------- Target ----------------
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---------------- Flash / PSRAM (Sparkle XH-S3E N16R8) ----------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# ---------------- Partition table ----------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ---------------- C++ ----------------
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
+
+# ---------------- Logging ----------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_COLORS=y
+
+# ---------------- FreeRTOS ----------------
+CONFIG_FREERTOS_HZ=1000
+
+# ---------------- Watchdog (safety_task feeds it in later phases) ----------------
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

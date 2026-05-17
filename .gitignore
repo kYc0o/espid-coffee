@@ -1,0 +1,23 @@
+# ESP-IDF build outputs
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults.local
+dependencies.lock
+managed_components/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# CMake / clangd
+compile_commands.json
+.cache/

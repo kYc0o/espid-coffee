@@ -1,0 +1,10 @@
+# ESPID-Coffee partition table — 16 MB flash, A/B OTA + 7 MB LittleFS.
+# Offsets are auto-calculated (left blank) by ESP-IDF gen_esp32part.py.
+# Name,     Type, SubType,  Offset,  Size,     Flags
+nvs,        data, nvs,      ,        0x10000,
+otadata,    data, ota,      ,        0x2000,
+phy_init,   data, phy,      ,        0x1000,
+ota_0,      app,  ota_0,    ,        0x400000,
+ota_1,      app,  ota_1,    ,        0x400000,
+storage,    data, spiffs,   ,        0x700000,
+coredump,   data, coredump, ,        0x40000,
