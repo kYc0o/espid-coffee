@@ -140,6 +140,7 @@ extern "C" void app_main(void) {
         /* clk_hz        */ 400'000U,
         /* dev_addr_7bit */ kOledAddr7bit,
         /* reset_pin     */ GPIO_NUM_NC,
+        /* rotation      */ espid::ssd1306::Ssd1306Display::Rotation::k180,
     };
     const auto ds = display.init(dsp_cfg);
     if (!ds.ok()) {
