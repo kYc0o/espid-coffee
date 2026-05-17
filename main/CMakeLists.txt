@@ -7,6 +7,10 @@ idf_component_register(
         esp_system
         esp_timer
         log
+        freertos
+        esp_driver_gpio
+        hal_cpp
+        tsic306
 )
 
 # Modern C++ for application code.
