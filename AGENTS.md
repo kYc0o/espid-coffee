@@ -49,15 +49,15 @@ Owner / workstation: macOS, zsh, ESP-IDF cloned at
 
 ## 3. Build & flash commands
 
-The user's shell has aggressive customisations. **Always scrub the
-environment** when invoking ESP-IDF tools, otherwise builds break in
-hard-to-debug ways. Canonical wrapper:
+Use the ESP-IDF shell setup once per terminal session, then call
+`idf.py` normally.
 
 ```sh
-env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    SHELL="$SHELL" TERM="$TERM" \
-    SSL_CERT_FILE=/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/certifi/cacert.pem \
-    bash -c '. /Users/facosta/git/espressif/esp-idf-v6.0.1/export.sh >/dev/null && idf.py <CMD>'
+# Preferred (alias from ~/.zshrc)
+get_idf
+
+# Fallback (if alias unavailable)
+. /Users/facosta/git/espressif/esp-idf-v6.0.1/export.sh
 ```
 
 Common `<CMD>` values:

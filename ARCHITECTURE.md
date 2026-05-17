@@ -63,7 +63,7 @@ ESPID-Coffee/
 │   │       ├── i_i2c_bus.hpp
 │   │       ├── i_zacwire_capture.hpp
 │   │       ├── i_display.hpp
-│   │       └── i_network.hpp     # NEW (Wi-Fi)
+│   │       └── i_network.hpp     # Wi-Fi HAL contract
 │   ├── tsic306/                  # RMT-based ZACwire driver + pure decoder
 │   ├── ssd1306/                  # U8g2-backed IDisplay implementation
 │   ├── pid/                      # header-only discrete PID controller
@@ -277,13 +277,15 @@ remains the compile-time fallback.
 
 ## 11. Build, flash, test
 
-Day-to-day commands (always env-scrubbed against shell pollution):
+Day-to-day commands (source ESP-IDF once per shell, then use `idf.py`
+normally):
 
 ```sh
+# Prepare shell (once per terminal session)
+get_idf
+
 # Build firmware
-env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin" SHELL="$SHELL" \
-  TERM="$TERM" SSL_CERT_FILE=/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/certifi/cacert.pem \
-  bash -c '. ~/git/espressif/esp-idf-v6.0.1/export.sh && idf.py build'
+idf.py build
 
 # Flash + monitor
 idf.py -p /dev/cu.usbmodem5ABA0676261 flash monitor
@@ -294,6 +296,12 @@ cmake -S host_tests -B host_tests/build && cmake --build host_tests/build \
 
 # Bisect-green sanity check across the last N commits
 scripts/bisect_verify.sh -n 5
+```
+
+If `get_idf` alias is unavailable in your shell:
+
+```sh
+. ~/git/espressif/esp-idf-v6.0.1/export.sh
 ```
 
 ---
@@ -313,7 +321,7 @@ scripts/bisect_verify.sh -n 5
 | 2d-3  | Brew button wiring + OLED shot view  | ✅ done  | `653fe47` |
 | 2e    | `main/config.hpp` (single SoT)       | ✅ done  | `d30bb14` |
 | 2f    | Boot splash                          | ✅ done  | `074797b` |
-| 3a    | **`INetwork` HAL contract**          | 🚧 active | this commit |
+| 3a    | **`INetwork` HAL contract**          | ✅ done  | `ede75a0` |
 | 3b    | Wi-Fi STA + AP-fallback impl         | ⏳ next  |       |
 | 3c    | Captive-portal credential capture    | ⏳ planned |     |
 | 3d    | `app_main` wiring + OLED Wi-Fi glyph | ⏳ planned |     |
