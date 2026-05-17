@@ -8,8 +8,13 @@ with modern C++17, TDD on the ESP-IDF Linux target, and A/B OTA.
 
 - **MCU**: ESP32-S3 (Sparkle XH-S3E N16R8 — 16 MB flash, 8 MB octal PSRAM)
 - **Temp sensor**: TSIC 306 on GPIO 1 (ZACwire 1-wire)
-- **Display**: SSD1306 0.96" OLED on I²C (SCL=GPIO 0, SDA=GPIO 2, addr 0x3C)
-- **Brew button**: GPIO 9 (active-low, internal pull-up)
+- **Display**: SSD1306 0.96" OLED on I²C (SDA=GPIO 8, SCL=GPIO 9, addr 0x3C, rotated 180°)
+- **Brew button**: GPIO 5 (active-low, hardware-debounced, internal pull-up fallback)
+
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — full system schematic, layering, tasks, data flow, roadmap.
+- [`AGENTS.md`](AGENTS.md) — handoff guide for new contributors / AI agents.
 
 ## Build & flash
 
@@ -21,17 +26,7 @@ idf.py build flash monitor
 
 ## Roadmap
 
-| Phase | Scope |
-|-------|-------|
-| 0 | Toolchain + partition table + boot OK |
-| 1 | HAL interfaces + gtest harness on Linux target |
-| 2 | TSIC 306 (RMT) → OLED °C display |
-| 3 | Brew button + timer state machine |
-| 4 | LittleFS + Wi-Fi SoftAP provisioning |
-| 5 | Minimal web UI (brew-time config) + FS upload |
-| 6 | Safety task scaffold + A/B OTA |
-
-Deferred: PID/SSR, pump PSM, HX711 scale, MQTT, TLS.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md#12-roadmap) for the live phase table.
 
 ## License
 
