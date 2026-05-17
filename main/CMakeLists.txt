@@ -11,6 +11,7 @@ idf_component_register(
         esp_driver_gpio
         hal_cpp
         tsic306
+        ssd1306
 )
 
 # Modern C++ for application code.
