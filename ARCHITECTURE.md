@@ -242,8 +242,8 @@ stateDiagram-v2
     Brewing --> Idle: brew button pressed (timer.stop)
 
     note right of Splash : "ESPID-Coffee"<br/>"v0.0.4"
-    note right of Idle : Big temperature<br/>Small shot footer (0.0 s)
-    note right of Brewing : Big shot timer<br/>Small temperature footer
+    note right of Idle : Big temperature<br/>Small shot footer (0.0 s)<br/>Wi-Fi badge in header
+    note right of Brewing : Big shot timer<br/>Small temperature footer<br/>Wi-Fi badge in header
 ```
 
 ---
@@ -323,9 +323,9 @@ If `get_idf` alias is unavailable in your shell:
 | 2e    | `main/config.hpp` (single SoT)       | ✅ done  | `d30bb14` |
 | 2f    | Boot splash                          | ✅ done  | `074797b` |
 | 3a    | **`INetwork` HAL contract**          | ✅ done  | `ede75a0` |
-| 3b    | Wi-Fi STA + AP-fallback impl         | 🚧 active | this commit |
+| 3b    | Wi-Fi STA + AP-fallback impl         | ✅ done  | `d8a3191` |
 | 3c    | Captive-portal credential capture    | ⏳ planned |     |
-| 3d    | `app_main` wiring + OLED Wi-Fi glyph | ⏳ planned |     |
+| 3d    | `app_main` wiring + OLED Wi-Fi glyph | 🚧 active | this commit |
 | 4a    | `IHeater` HAL + slow-PWM SSR driver  | ⏳ planned |     |
 | 4b    | `control_task` running `pid::Controller` | ⏳ planned |  |
 | 5a    | Embedded web UI scaffold (`esp_http_server` + static assets) | ⏳ planned | |

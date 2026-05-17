@@ -24,12 +24,24 @@
 #include "ssd1306/ssd1306_display.hpp"
 #include "tsic306/tsic306_decoder.hpp"
 #include "tsic306/tsic306_driver.hpp"
+#include "wifi/esp_wifi_network.hpp"
 
 namespace {
 
 namespace cfg = espid::config;
 
 constexpr const char* kTag = cfg::kLogTag;
+
+const char* wifi_label(espid::hal_cpp::WifiState s) noexcept {
+    switch (s) {
+        case espid::hal_cpp::WifiState::kConnected:  return "W:OK";
+        case espid::hal_cpp::WifiState::kConnecting: return "W:..";
+        case espid::hal_cpp::WifiState::kApFallback: return "W:AP";
+        case espid::hal_cpp::WifiState::kError:      return "W:ER";
+        case espid::hal_cpp::WifiState::kIdle:
+        default:                                      return "W:--";
+    }
+}
 
 espid::ssd1306::Ssd1306Display::Rotation oled_rotation() {
     using R = espid::ssd1306::Ssd1306Display::Rotation;
@@ -60,6 +72,9 @@ struct ShotSnapshot {
 };
 
 ShotSnapshot g_shot;
+
+std::atomic<espid::hal_cpp::WifiState> g_wifi_state{
+    espid::hal_cpp::WifiState::kIdle};
 
 struct SensorTaskCtx {
     espid::tsic306::Tsic306Driver*  driver;
@@ -114,6 +129,8 @@ void display_task(void* arg) {
             g_shot.elapsed_ms.load(std::memory_order_relaxed);
         const bool shot_active =
             g_shot.running.load(std::memory_order_relaxed);
+        const espid::hal_cpp::WifiState wifi_state =
+            g_wifi_state.load(std::memory_order_acquire);
 
         char temp_str[16];
         if (valid && std::isfinite(t)) {
@@ -125,6 +142,8 @@ void display_task(void* arg) {
 
         display->clear();
         display->draw_text(0, 8, espid::hal_cpp::Font::kSmall, "ESPID-Coffee");
+        display->draw_text(96, 8, espid::hal_cpp::Font::kSmall,
+                   wifi_label(wifi_state));
 
         if (shot_active) {
             // Shot in progress (or just finished): timer takes the big slot,
@@ -202,6 +221,7 @@ extern "C" void app_main(void) {
     static espid::tsic306::Tsic306Driver  driver;
     static espid::tsic306::Tsic306Decoder decoder;
     static espid::ssd1306::Ssd1306Display display;
+    static espid::wifi::EspWifiNetwork     wifi;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
@@ -241,6 +261,29 @@ extern "C" void app_main(void) {
                           cfg::kFirmwareName);
         display.draw_text(32, 50, espid::hal_cpp::Font::kSmall, ver);
         (void)display.flush();
+    }
+
+    if (cfg::net::kWifiEnabled) {
+        espid::hal_cpp::INetwork::Config wifi_cfg{};
+        // STA credentials are injected in a later phase (NVS/captive portal).
+        // For now, this enables AP fallback and keeps observability in place.
+        wifi_cfg.sta_ssid = nullptr;
+        wifi_cfg.sta_password = nullptr;
+        wifi_cfg.ap_ssid = nullptr;
+        wifi_cfg.ap_password = cfg::net::kApPassword;
+        wifi_cfg.hostname = cfg::net::kHostname;
+        wifi_cfg.max_sta_retries = cfg::net::kMaxReconnects;
+        wifi_cfg.reconnect_delay_ms = cfg::net::kReconnectDelayMs;
+
+        const auto ws = wifi.init(wifi_cfg);
+        if (!ws.ok()) {
+            ESP_LOGW(kTag, "Wi-Fi init failed: %s - continuing without network",
+                     espid::hal_cpp::to_string(ws.error()));
+            g_wifi_state.store(espid::hal_cpp::WifiState::kError,
+                               std::memory_order_release);
+        } else {
+            g_wifi_state.store(wifi.state(), std::memory_order_release);
+        }
     }
 
     static SensorTaskCtx ctx{&driver, &decoder};
@@ -291,6 +334,9 @@ extern "C" void app_main(void) {
     // no frames arrive (e.g. sensor disconnected).
     std::uint32_t tick = 0;
     while (true) {
+        if (cfg::net::kWifiEnabled) {
+            g_wifi_state.store(wifi.state(), std::memory_order_release);
+        }
         ESP_LOGI(kTag, "heartbeat tick=%" PRIu32, tick++);
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
