@@ -41,13 +41,21 @@ target_include_directories(espid_tsic306_decoder PUBLIC
     ${REPO_ROOT}/components/hal_cpp/include
 )
 
+# pid is header-only; expose its include dir as an INTERFACE target.
+add_library(espid_pid INTERFACE)
+target_include_directories(espid_pid INTERFACE
+    ${REPO_ROOT}/components/pid/include
+)
+
 # ---------------- Test binary ----------------
 add_executable(espid_unit_tests
     test_sanity.cpp
     test_tsic306_decoder.cpp
+    test_pid.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder
+    espid_pid
     GTest::gtest_main
     GTest::gmock
 )

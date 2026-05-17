@@ -1,0 +1,173 @@
+// ESPID-Coffee — pid::Controller unit tests.
+//
+// Pure host tests. Cover the contract described in
+// `components/pid/include/pid/controller.hpp`:
+//   - P-only, fresh controller: output = clamp(kp * error)
+//   - Output saturation
+//   - Integrator accumulates at ki * error * dt and clamps
+//   - Derivative on measurement: no kick on setpoint step
+//   - Derivative reacts to a measurement change
+//   - reset() clears integrator and derivative history
+//   - First update has zero D contribution (no previous measurement)
+
+#include <gtest/gtest.h>
+
+#include "pid/controller.hpp"
+
+namespace {
+
+using espid::pid::Controller;
+
+constexpr float kEps = 1e-5F;
+
+Controller::Config p_only(float kp, float out_min = -10.0F, float out_max = 10.0F) {
+    Controller::Config c{};
+    c.kp              = kp;
+    c.output_min      = out_min;
+    c.output_max      = out_max;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    c.sample_period_s = 0.1F;
+    return c;
+}
+
+TEST(PidController, ProportionalOnlyMatchesKpTimesError) {
+    Controller pid(p_only(2.0F));
+    EXPECT_NEAR(pid.update(/*setpoint=*/10.0F, /*meas=*/8.0F), 4.0F, kEps);
+}
+
+TEST(PidController, OutputClampsAtMax) {
+    auto cfg       = p_only(100.0F);
+    cfg.output_max = 1.0F;
+    Controller pid(cfg);
+    EXPECT_FLOAT_EQ(pid.update(50.0F, 0.0F), 1.0F);
+}
+
+TEST(PidController, OutputClampsAtMin) {
+    auto cfg       = p_only(100.0F);
+    cfg.output_min = -1.0F;
+    Controller pid(cfg);
+    EXPECT_FLOAT_EQ(pid.update(0.0F, 50.0F), -1.0F);
+}
+
+TEST(PidController, IntegralAccumulatesAtKiErrorDt) {
+    Controller::Config c{};
+    c.ki              = 1.0F;
+    c.sample_period_s = 0.1F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    Controller pid(c);
+
+    // error=2, dt=0.1, ki=1 → +0.2 per step.
+    EXPECT_NEAR(pid.update(2.0F, 0.0F), 0.2F, kEps);
+    EXPECT_NEAR(pid.update(2.0F, 0.0F), 0.4F, kEps);
+    EXPECT_NEAR(pid.update(2.0F, 0.0F), 0.6F, kEps);
+}
+
+TEST(PidController, IntegralAntiWindupClamps) {
+    Controller::Config c{};
+    c.ki              = 1.0F;
+    c.sample_period_s = 1.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -0.5F;
+    c.integral_max    =  0.5F;
+    Controller pid(c);
+
+    // Drive integrator far past max; it must clamp.
+    for (int i = 0; i < 100; ++i) {
+        (void)pid.update(1.0F, 0.0F);
+    }
+    EXPECT_FLOAT_EQ(pid.integral_state(), 0.5F);
+
+    // Now drive it negative; must clamp the other way.
+    for (int i = 0; i < 100; ++i) {
+        (void)pid.update(0.0F, 1.0F);
+    }
+    EXPECT_FLOAT_EQ(pid.integral_state(), -0.5F);
+}
+
+TEST(PidController, SetpointStepProducesNoDerivativeKick) {
+    Controller::Config c{};
+    c.kp              = 0.0F;
+    c.ki              = 0.0F;
+    c.kd              = 10.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    c.sample_period_s = 0.1F;
+    Controller pid(c);
+
+    // Settle: measurement stays at 20 across two calls.
+    (void)pid.update(20.0F, 20.0F);
+    const float out_settled = pid.update(20.0F, 20.0F);
+    EXPECT_NEAR(out_settled, 0.0F, kEps);
+
+    // Setpoint jumps; measurement does NOT. D-on-measurement → 0 kick.
+    const float out_after_step = pid.update(100.0F, 20.0F);
+    EXPECT_NEAR(out_after_step, 0.0F, kEps);
+}
+
+TEST(PidController, DerivativeReactsToMeasurementChange) {
+    Controller::Config c{};
+    c.kp              = 0.0F;
+    c.ki              = 0.0F;
+    c.kd              = 1.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    c.sample_period_s = 0.1F;
+    Controller pid(c);
+
+    (void)pid.update(50.0F, 10.0F);  // seed last_measurement
+    // Measurement rises by 5 over dt=0.1 → d_meas = +50; out = -kd * 50 = -50
+    EXPECT_NEAR(pid.update(50.0F, 15.0F), -50.0F, kEps);
+}
+
+TEST(PidController, FirstUpdateHasNoDerivativeTerm) {
+    Controller::Config c{};
+    c.kp              = 0.0F;
+    c.kd              = 1000.0F;
+    c.output_min      = -1e6F;
+    c.output_max      =  1e6F;
+    c.integral_min    = -1e6F;
+    c.integral_max    =  1e6F;
+    c.sample_period_s = 0.1F;
+    Controller pid(c);
+
+    // Despite huge kd, the very first call has no prior sample → 0.
+    EXPECT_NEAR(pid.update(0.0F, 1234.0F), 0.0F, kEps);
+}
+
+TEST(PidController, ResetClearsIntegralAndDerivativeHistory) {
+    Controller::Config c{};
+    c.kp              = 0.0F;
+    c.ki              = 1.0F;
+    c.kd              = 1.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    c.sample_period_s = 0.1F;
+    Controller pid(c);
+
+    (void)pid.update(10.0F, 0.0F);
+    (void)pid.update(10.0F, 5.0F);
+    EXPECT_GT(pid.integral_state(), 0.0F);
+
+    pid.reset();
+    EXPECT_FLOAT_EQ(pid.integral_state(), 0.0F);
+
+    // After reset, first call must not produce a derivative term.
+    Controller::Config kd_only = c;
+    kd_only.ki                 = 0.0F;
+    pid.set_config(kd_only);
+    pid.reset();
+    EXPECT_NEAR(pid.update(0.0F, 9999.0F), 0.0F, kEps);
+}
+
+}  // namespace
