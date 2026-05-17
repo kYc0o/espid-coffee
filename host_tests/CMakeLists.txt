@@ -47,15 +47,23 @@ target_include_directories(espid_pid INTERFACE
     ${REPO_ROOT}/components/pid/include
 )
 
+# brew is header-only (BrewButton + ShotTimer).
+add_library(espid_brew INTERFACE)
+target_include_directories(espid_brew INTERFACE
+    ${REPO_ROOT}/components/brew/include
+)
+
 # ---------------- Test binary ----------------
 add_executable(espid_unit_tests
     test_sanity.cpp
     test_tsic306_decoder.cpp
     test_pid.cpp
+    test_brew.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder
     espid_pid
+    espid_brew
     GTest::gtest_main
     GTest::gmock
 )
