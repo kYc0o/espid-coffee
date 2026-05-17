@@ -13,6 +13,7 @@ idf_component_register(
         tsic306
         ssd1306
         brew
+        wifi
 )
 
 # Modern C++ for application code.

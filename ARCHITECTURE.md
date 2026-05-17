@@ -66,6 +66,7 @@ ESPID-Coffee/
 │   │       └── i_network.hpp     # Wi-Fi HAL contract
 │   ├── tsic306/                  # RMT-based ZACwire driver + pure decoder
 │   ├── ssd1306/                  # U8g2-backed IDisplay implementation
+│   ├── wifi/                     # esp_wifi INetwork impl (STA + AP fallback)
 │   ├── pid/                      # header-only discrete PID controller
 │   └── brew/                     # debounced brew button + shot timer (header-only)
 ├── host_tests/                   # GoogleTest harness, ESP-IDF Linux target
@@ -93,7 +94,7 @@ flowchart TB
         SSD["ssd1306"]
         BREW["brew"]
         PID["pid"]
-        WIFI["wifi (planned)"]
+      WIFI["wifi (STA/AP fallback impl)"]
         HEAT["heater (planned)"]
         HTTPSVC["webui (planned)"]
         NVS["settings/NVS (planned)"]
@@ -322,7 +323,7 @@ If `get_idf` alias is unavailable in your shell:
 | 2e    | `main/config.hpp` (single SoT)       | ✅ done  | `d30bb14` |
 | 2f    | Boot splash                          | ✅ done  | `074797b` |
 | 3a    | **`INetwork` HAL contract**          | ✅ done  | `ede75a0` |
-| 3b    | Wi-Fi STA + AP-fallback impl         | ⏳ next  |       |
+| 3b    | Wi-Fi STA + AP-fallback impl         | 🚧 active | this commit |
 | 3c    | Captive-portal credential capture    | ⏳ planned |     |
 | 3d    | `app_main` wiring + OLED Wi-Fi glyph | ⏳ planned |     |
 | 4a    | `IHeater` HAL + slow-PWM SSR driver  | ⏳ planned |     |
