@@ -12,6 +12,7 @@ idf_component_register(
         hal_cpp
         tsic306
         ssd1306
+        brew
 )
 
 # Modern C++ for application code.

@@ -11,8 +11,11 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "brew/brew_button.hpp"
+#include "brew/shot_timer.hpp"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -37,6 +40,13 @@ constexpr gpio_num_t    kOledScl         = GPIO_NUM_9;
 constexpr std::uint8_t  kOledAddr7bit    = 0x3C;
 constexpr std::uint32_t kDisplayPeriodMs = 200;  // ~5 Hz refresh.
 
+// Brew button.  Active-low, normally pulled high by an external RC +
+// Schmitt-trigger debounce circuit; we still enable the internal
+// pull-up as a fallback and apply a short software debounce on top.
+constexpr gpio_num_t    kBrewBtnGpio     = GPIO_NUM_5;
+constexpr std::uint32_t kButtonPeriodMs  = 10;
+constexpr std::uint32_t kButtonDebounceMs = 10;
+
 // Atomic snapshot published by sensor_task and consumed by display_task.
 // 32-bit values on ESP32-S3 are naturally aligned/atomic, so no spinlock
 // is needed; `valid` acts as the publication barrier.
@@ -47,6 +57,15 @@ struct Snapshot {
 };
 
 Snapshot g_snapshot;
+
+// Shot-timer snapshot, also published atomically.  display_task reads
+// (running, elapsed_ms) to render the bottom line.
+struct ShotSnapshot {
+    std::atomic<std::uint32_t> elapsed_ms{0};
+    std::atomic<bool>          running{false};
+};
+
+ShotSnapshot g_shot;
 
 struct SensorTaskCtx {
     espid::tsic306::Tsic306Driver*  driver;
@@ -88,35 +107,93 @@ void display_task(void* arg) {
     ESP_LOGI(kTag, "display_task: running on core %d", xPortGetCoreID());
 
     char big[16];
-    char raw[16];
+    char small[24];
 
     for (;;) {
-        const bool          valid = g_snapshot.valid.load(std::memory_order_acquire);
-        const float         t     = g_snapshot.temp_c.load(std::memory_order_relaxed);
-        const std::uint16_t r     = g_snapshot.raw.load(std::memory_order_relaxed);
+        const bool  valid = g_snapshot.valid.load(std::memory_order_acquire);
+        const float t     = g_snapshot.temp_c.load(std::memory_order_relaxed);
+        const std::uint32_t shot_ms =
+            g_shot.elapsed_ms.load(std::memory_order_relaxed);
+        const bool shot_active =
+            g_shot.running.load(std::memory_order_relaxed);
 
+        char temp_str[16];
         if (valid && std::isfinite(t)) {
-            std::snprintf(big, sizeof(big), "%5.2f", static_cast<double>(t));
+            std::snprintf(temp_str, sizeof(temp_str), "%5.2f",
+                          static_cast<double>(t));
         } else {
-            std::snprintf(big, sizeof(big), "--.--");
+            std::snprintf(temp_str, sizeof(temp_str), "--.--");
         }
-        std::snprintf(raw, sizeof(raw), "raw=0x%04X", static_cast<unsigned>(r));
 
         display->clear();
-        display->draw_text(0,   8, espid::hal_cpp::Font::kSmall, "ESPID-Coffee");
-        display->draw_text(8,  40, espid::hal_cpp::Font::kLarge, big);
-        display->draw_text(110, 22, espid::hal_cpp::Font::kSmall, "C");
-        display->draw_text(0,  62, espid::hal_cpp::Font::kSmall, raw);
+        display->draw_text(0, 8, espid::hal_cpp::Font::kSmall, "ESPID-Coffee");
+
+        if (shot_active) {
+            // Shot in progress (or just finished): timer takes the big slot,
+            // temperature drops to the small footer.
+            std::snprintf(big, sizeof(big), "%4.1fs",
+                          static_cast<double>(shot_ms) / 1000.0);
+            std::snprintf(small, sizeof(small), "T=%s C", temp_str);
+            display->draw_text(8,  40, espid::hal_cpp::Font::kLarge, big);
+            display->draw_text(0,  62, espid::hal_cpp::Font::kSmall, small);
+        } else {
+            // Idle: temperature is the headline; timer line shows 0.0 s.
+            std::snprintf(small, sizeof(small), "shot %4.1f s",
+                          static_cast<double>(shot_ms) / 1000.0);
+            display->draw_text(8,  40, espid::hal_cpp::Font::kLarge, temp_str);
+            display->draw_text(110, 22, espid::hal_cpp::Font::kSmall, "C");
+            display->draw_text(0,  62, espid::hal_cpp::Font::kSmall, small);
+        }
         (void)display->flush();
 
         vTaskDelay(pdMS_TO_TICKS(kDisplayPeriodMs));
     }
 }
 
+// Polled brew-button task.  Reads the raw GPIO at kButtonPeriodMs,
+// runs it through the BrewButton debounce filter, and toggles the
+// ShotTimer on each debounced press (release is ignored: the timer is
+// edge-triggered so a quick tap starts it and another tap stops it).
+void button_task(void* /*arg*/) {
+    ESP_LOGI(kTag, "button_task: running on core %d (gpio=%d)",
+             xPortGetCoreID(), static_cast<int>(kBrewBtnGpio));
+
+    espid::brew::BrewButton::Config bcfg{};
+    bcfg.active_low  = true;
+    bcfg.debounce_ms = kButtonDebounceMs;
+    espid::brew::BrewButton btn(bcfg);
+    espid::brew::ShotTimer  timer;
+
+    for (;;) {
+        const int           raw    = gpio_get_level(kBrewBtnGpio);
+        const std::uint64_t now_ms = static_cast<std::uint64_t>(
+            esp_timer_get_time() / 1000);
+
+        const auto ev = btn.poll(raw != 0, now_ms);
+        if (ev == espid::brew::BrewButton::Event::kPressed) {
+            if (timer.running()) {
+                timer.stop(now_ms);
+                ESP_LOGI(kTag, "brew: stop  elapsed=%u ms",
+                         static_cast<unsigned>(timer.elapsed_ms(now_ms)));
+            } else {
+                timer.reset();
+                timer.start(now_ms);
+                ESP_LOGI(kTag, "brew: start");
+            }
+        }
+
+        g_shot.elapsed_ms.store(timer.elapsed_ms(now_ms),
+                                std::memory_order_relaxed);
+        g_shot.running.store(timer.running(), std::memory_order_relaxed);
+
+        vTaskDelay(pdMS_TO_TICKS(kButtonPeriodMs));
+    }
+}
+
 }  // namespace
 
 extern "C" void app_main(void) {
-    ESP_LOGI(kTag, "boot OK - ESPID-Coffee v0.0.3");
+    ESP_LOGI(kTag, "boot OK - ESPID-Coffee v0.0.4");
     ESP_LOGI(kTag, "target=esp32s3 flash=16MB psram=octal/80MHz");
 
     static espid::tsic306::Tsic306Driver  driver;
@@ -164,6 +241,28 @@ extern "C" void app_main(void) {
             &display_task, "display", 4096, &display, 4, nullptr, 1);
         if (ok != pdPASS) {
             ESP_LOGW(kTag, "display_task create failed - continuing without UI");
+        }
+    }
+
+    // Brew button on kBrewBtnGpio.  Hardware debounce + internal pull-up
+    // fallback; software debounce kButtonDebounceMs.
+    {
+        gpio_config_t bcfg{};
+        bcfg.pin_bit_mask = 1ULL << static_cast<int>(kBrewBtnGpio);
+        bcfg.mode         = GPIO_MODE_INPUT;
+        bcfg.pull_up_en   = GPIO_PULLUP_ENABLE;
+        bcfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        bcfg.intr_type    = GPIO_INTR_DISABLE;
+        const esp_err_t err = gpio_config(&bcfg);
+        if (err != ESP_OK) {
+            ESP_LOGW(kTag, "brew button gpio_config failed: %s - skipping",
+                     esp_err_to_name(err));
+        } else {
+            ok = xTaskCreatePinnedToCore(
+                &button_task, "button", 3072, nullptr, 3, nullptr, 1);
+            if (ok != pdPASS) {
+                ESP_LOGW(kTag, "button_task create failed - no brew control");
+            }
         }
     }
 
