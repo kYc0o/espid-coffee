@@ -28,11 +28,26 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 include(GoogleTest)
 
+# ---------------- Units under test ----------------
+# We pull source files directly from components/. Headers are header-only or
+# ESP-IDF-free, so this compiles cleanly on the host.
+set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
+add_library(espid_tsic306_decoder STATIC
+    ${REPO_ROOT}/components/tsic306/src/tsic306_decoder.cpp
+)
+target_include_directories(espid_tsic306_decoder PUBLIC
+    ${REPO_ROOT}/components/tsic306/include
+    ${REPO_ROOT}/components/hal_cpp/include
+)
+
 # ---------------- Test binary ----------------
 add_executable(espid_unit_tests
     test_sanity.cpp
+    test_tsic306_decoder.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
+    espid_tsic306_decoder
     GTest::gtest_main
     GTest::gmock
 )
