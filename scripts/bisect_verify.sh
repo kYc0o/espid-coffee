@@ -11,7 +11,7 @@
 #                                           # "since last pushed/known-good")
 #
 # Exactly one of -n / -s may be given; with neither, all commits are checked.
-set -e
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -81,7 +81,7 @@ idf_build() {
     env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         SHELL="$SHELL" TERM="$TERM" SSL_CERT_FILE="$SSL_CERT_FILE" \
         bash -c ". '$IDF_EXPORT' >/dev/null && idf.py build" \
-        > /tmp/bisect_idf.log 2>&1
+        < /dev/null > /tmp/bisect_idf.log 2>&1
 }
 
 host_build_test() {
@@ -104,13 +104,21 @@ for sha in $SHAS; do
     rm -rf build
 
     echo -n "  idf.py build: "
-    if idf_build; then echo "OK"; else echo "FAIL"; tail -30 /tmp/bisect_idf.log; exit 1; fi
+    start=$SECONDS
+    if idf_build; then
+        echo "OK ($((SECONDS - start))s)"
+    else
+        echo "FAIL"
+        tail -30 /tmp/bisect_idf.log
+        exit 1
+    fi
 
     if [[ -f host_tests/CMakeLists.txt ]]; then
         echo -n "  host cmake+ctest: "
+        start=$SECONDS
         if host_build_test; then
             passed=$(grep -E "tests passed" /tmp/bisect_host_test.log | tail -1)
-            echo "OK ($passed)"
+            echo "OK ($passed, $((SECONDS - start))s)"
         else
             echo "FAIL"
             tail -30 /tmp/bisect_host_build.log /tmp/bisect_host_test.log
