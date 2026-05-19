@@ -8,6 +8,7 @@ idf_component_register(
         esp_timer
         log
         freertos
+        nvs_flash
         esp_driver_gpio
         hal_cpp
         tsic306

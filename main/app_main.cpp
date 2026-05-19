@@ -17,6 +17,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -41,6 +42,90 @@ const char* wifi_label(espid::hal_cpp::WifiState s) noexcept {
         case espid::hal_cpp::WifiState::kIdle:
         default:                                      return "W:--";
     }
+}
+
+const char* configured_ap_ssid() noexcept {
+    return (cfg::net::kApSsid != nullptr && cfg::net::kApSsid[0] != '\0')
+               ? cfg::net::kApSsid
+               : "ESPID-Coffee";
+}
+
+bool init_nvs_for_wifi() noexcept {
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_OK) {
+        return true;
+    }
+
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(kTag, "NVS init returned %s, erasing NVS partition",
+                 esp_err_to_name(err));
+        if (nvs_flash_erase() != ESP_OK) {
+            return false;
+        }
+        err = nvs_flash_init();
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "NVS init failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
+bool wifi_ready(espid::hal_cpp::WifiState s) noexcept {
+    return s == espid::hal_cpp::WifiState::kConnected ||
+           s == espid::hal_cpp::WifiState::kApFallback;
+}
+
+void draw_wifi_wait_screen(espid::ssd1306::Ssd1306Display& display,
+                           espid::hal_cpp::WifiState state,
+                           const char* ip) noexcept {
+    display.clear();
+
+    switch (state) {
+        case espid::hal_cpp::WifiState::kConnected:
+            display.draw_text(0, 12, espid::hal_cpp::Font::kSmall,
+                              "Wi-Fi connected");
+            break;
+
+        case espid::hal_cpp::WifiState::kApFallback: {
+            char ssid_line[24];
+            char pw_line[24];
+            std::snprintf(ssid_line, sizeof(ssid_line), "SSID:%s",
+                          configured_ap_ssid());
+            if (cfg::net::kApPassword != nullptr && cfg::net::kApPassword[0] != '\0') {
+                std::snprintf(pw_line, sizeof(pw_line), "PW:%s",
+                              cfg::net::kApPassword);
+            } else {
+                std::snprintf(pw_line, sizeof(pw_line), "PW:(open)");
+            }
+            display.draw_text(0, 4, espid::hal_cpp::Font::kSmall,
+                              "AP setup active");
+            display.draw_text(0, 22, espid::hal_cpp::Font::kSmall, ssid_line);
+            display.draw_text(0, 40, espid::hal_cpp::Font::kSmall, pw_line);
+            break;
+        }
+
+        case espid::hal_cpp::WifiState::kError:
+            display.draw_text(0, 12, espid::hal_cpp::Font::kSmall,
+                              "Wi-Fi error");
+            display.draw_text(0, 30, espid::hal_cpp::Font::kSmall,
+                              "Check logs");
+            break;
+
+        case espid::hal_cpp::WifiState::kConnecting:
+        case espid::hal_cpp::WifiState::kIdle:
+        default:
+            display.draw_text(0, 12, espid::hal_cpp::Font::kSmall,
+                              "Connecting Wi-Fi...");
+            break;
+    }
+
+    char ip_line[24];
+    std::snprintf(ip_line, sizeof(ip_line), "IP:%s", ip != nullptr ? ip : "0.0.0.0");
+    display.draw_text(0, 58, espid::hal_cpp::Font::kSmall, ip_line);
+    (void)display.flush();
 }
 
 espid::ssd1306::Ssd1306Display::Rotation oled_rotation() {
@@ -72,9 +157,7 @@ struct ShotSnapshot {
 };
 
 ShotSnapshot g_shot;
-
-std::atomic<espid::hal_cpp::WifiState> g_wifi_state{
-    espid::hal_cpp::WifiState::kIdle};
+espid::hal_cpp::INetwork* g_network = nullptr;
 
 struct SensorTaskCtx {
     espid::tsic306::Tsic306Driver*  driver;
@@ -129,8 +212,14 @@ void display_task(void* arg) {
             g_shot.elapsed_ms.load(std::memory_order_relaxed);
         const bool shot_active =
             g_shot.running.load(std::memory_order_relaxed);
-        const espid::hal_cpp::WifiState wifi_state =
-            g_wifi_state.load(std::memory_order_acquire);
+        espid::hal_cpp::WifiState wifi_state =
+            espid::hal_cpp::WifiState::kIdle;
+        espid::hal_cpp::INetwork::IpString wifi_ip{};
+        std::snprintf(wifi_ip.data(), wifi_ip.size(), "0.0.0.0");
+        if (g_network != nullptr) {
+            wifi_state = g_network->state();
+            wifi_ip = g_network->ip_string();
+        }
 
         char temp_str[16];
         if (valid && std::isfinite(t)) {
@@ -141,9 +230,18 @@ void display_task(void* arg) {
         }
 
         display->clear();
-        display->draw_text(0, 8, espid::hal_cpp::Font::kSmall, "ESPID-Coffee");
-        display->draw_text(96, 8, espid::hal_cpp::Font::kSmall,
-                   wifi_label(wifi_state));
+        if (wifi_state == espid::hal_cpp::WifiState::kApFallback) {
+            char ap_hdr[20];
+            std::snprintf(ap_hdr, sizeof(ap_hdr), "AP:%s", configured_ap_ssid());
+            display->draw_text(0, 8, espid::hal_cpp::Font::kSmall, ap_hdr);
+            display->draw_text(86, 8, espid::hal_cpp::Font::kSmall,
+                               wifi_ip.data());
+        } else {
+            display->draw_text(0, 8, espid::hal_cpp::Font::kSmall,
+                               "ESPID-Coffee");
+            display->draw_text(96, 8, espid::hal_cpp::Font::kSmall,
+                               wifi_label(wifi_state));
+        }
 
         if (shot_active) {
             // Shot in progress (or just finished): timer takes the big slot,
@@ -161,6 +259,17 @@ void display_task(void* arg) {
             display->draw_text(110, 22, espid::hal_cpp::Font::kSmall, "C");
             display->draw_text(0,  62, espid::hal_cpp::Font::kSmall, small);
         }
+        if (wifi_state == espid::hal_cpp::WifiState::kApFallback) {
+            char ap_pw[24];
+            if (cfg::net::kApPassword != nullptr &&
+                cfg::net::kApPassword[0] != '\0') {
+                std::snprintf(ap_pw, sizeof(ap_pw), "PW:%s", cfg::net::kApPassword);
+            } else {
+                std::snprintf(ap_pw, sizeof(ap_pw), "PW:(open)");
+            }
+            display->draw_text(0, 62, espid::hal_cpp::Font::kSmall, ap_pw);
+        }
+
         (void)display->flush();
 
         vTaskDelay(pdMS_TO_TICKS(cfg::oled::kRefreshPeriodMs));
@@ -264,25 +373,64 @@ extern "C" void app_main(void) {
     }
 
     if (cfg::net::kWifiEnabled) {
-        espid::hal_cpp::INetwork::Config wifi_cfg{};
-        // STA credentials are injected in a later phase (NVS/captive portal).
-        // For now, this enables AP fallback and keeps observability in place.
-        wifi_cfg.sta_ssid = nullptr;
-        wifi_cfg.sta_password = nullptr;
-        wifi_cfg.ap_ssid = nullptr;
-        wifi_cfg.ap_password = cfg::net::kApPassword;
-        wifi_cfg.hostname = cfg::net::kHostname;
-        wifi_cfg.max_sta_retries = cfg::net::kMaxReconnects;
-        wifi_cfg.reconnect_delay_ms = cfg::net::kReconnectDelayMs;
-
-        const auto ws = wifi.init(wifi_cfg);
-        if (!ws.ok()) {
-            ESP_LOGW(kTag, "Wi-Fi init failed: %s - continuing without network",
-                     espid::hal_cpp::to_string(ws.error()));
-            g_wifi_state.store(espid::hal_cpp::WifiState::kError,
-                               std::memory_order_release);
+        if (!init_nvs_for_wifi()) {
+            ESP_LOGE(kTag, "Wi-Fi init blocked: NVS is not available");
+            if (ds.ok()) {
+                display.clear();
+                display.draw_text(0, 12, espid::hal_cpp::Font::kSmall,
+                                  "Wi-Fi unavailable");
+                display.draw_text(0, 30, espid::hal_cpp::Font::kSmall,
+                                  "NVS init failed");
+                (void)display.flush();
+            }
+            for (;;) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
         } else {
-            g_wifi_state.store(wifi.state(), std::memory_order_release);
+            espid::hal_cpp::INetwork::Config wifi_cfg{};
+            wifi_cfg.sta_ssid = cfg::net::kStaSsid;
+            wifi_cfg.sta_password = cfg::net::kStaPassword;
+            wifi_cfg.ap_ssid = cfg::net::kApSsid;
+            wifi_cfg.ap_password = cfg::net::kApPassword;
+            wifi_cfg.hostname = cfg::net::kHostname;
+            wifi_cfg.max_sta_retries = cfg::net::kMaxReconnects;
+            wifi_cfg.reconnect_delay_ms = cfg::net::kReconnectDelayMs;
+
+            const auto ws = wifi.init(wifi_cfg);
+            if (!ws.ok()) {
+                ESP_LOGE(kTag, "Wi-Fi init failed: %s",
+                         espid::hal_cpp::to_string(ws.error()));
+                if (ds.ok()) {
+                    display.clear();
+                    display.draw_text(0, 12, espid::hal_cpp::Font::kSmall,
+                                      "Wi-Fi init failed");
+                    display.draw_text(0, 30, espid::hal_cpp::Font::kSmall,
+                                      "Check logs");
+                    (void)display.flush();
+                }
+                for (;;) {
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+            }
+
+            g_network = &wifi;
+
+            // Gate downstream tasks on network readiness so the AP/STA
+            // onboarding state is presented first on OLED.
+            while (true) {
+                const auto wifi_state = wifi.state();
+                const auto wifi_ip = wifi.ip_string();
+                if (ds.ok()) {
+                    draw_wifi_wait_screen(display, wifi_state, wifi_ip.data());
+                }
+                if (wifi_ready(wifi_state)) {
+                    ESP_LOGI(kTag, "Wi-Fi ready (%s, ip=%s)",
+                             espid::hal_cpp::to_string(wifi_state),
+                             wifi_ip.data());
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
         }
     }
 
@@ -334,9 +482,6 @@ extern "C" void app_main(void) {
     // no frames arrive (e.g. sensor disconnected).
     std::uint32_t tick = 0;
     while (true) {
-        if (cfg::net::kWifiEnabled) {
-            g_wifi_state.store(wifi.state(), std::memory_order_release);
-        }
         ESP_LOGI(kTag, "heartbeat tick=%" PRIu32, tick++);
         vTaskDelay(pdMS_TO_TICKS(5000));
     }

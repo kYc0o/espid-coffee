@@ -123,9 +123,12 @@ constexpr std::uint32_t kPwmPeriodMs    = 1000;
 // Networking (stub — Wi-Fi / web UI not yet implemented)
 // ---------------------------------------------------------------------------
 namespace net {
-constexpr bool          kWifiEnabled    = false;
+constexpr bool          kWifiEnabled    = true;
 constexpr const char*   kHostname       = "espid-coffee";
-constexpr const char*   kApPassword     = "EspidCoffee";  // WiFiManager AP fallback
+constexpr const char*   kStaSsid        = "";
+constexpr const char*   kStaPassword    = "";
+constexpr const char*   kApSsid         = "ESPID-Coffee-Setup";
+constexpr const char*   kApPassword     = "EspidCoffee";
 constexpr std::uint8_t  kMaxReconnects  = 5;
 constexpr std::uint32_t kReconnectDelayMs = 10'000;
 constexpr bool          kOtaEnabled     = false;
