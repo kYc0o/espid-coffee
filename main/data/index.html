@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESPID-Coffee</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <h1>ESPID-Coffee</h1>
+
+  <h2>Wi-Fi Provisioning</h2>
+  <p>AP: <strong id="ap-ssid">ESPID-Coffee</strong></p>
+  <form method="POST" action="/wifi">
+    <label>Wi-Fi SSID
+      <input name="ssid" id="ssid" maxlength="32" required autocomplete="off">
+    </label>
+    <label>Password
+      <span class="pw-wrap">
+        <input id="pwd" name="password" type="password" maxlength="64" autocomplete="new-password">
+        <button type="button" id="show-pw">Show</button>
+      </span>
+    </label>
+    <button type="submit">Save &amp; Reboot</button>
+  </form>
+
+  <h2>Machine Settings</h2>
+  <form method="POST" action="/settings">
+    <label>PID Kp          <input name="pid_kp"          id="pid_kp"></label>
+    <label>PID Tn (s)      <input name="pid_tn"          id="pid_tn"></label>
+    <label>PID Tv (s)      <input name="pid_tv"          id="pid_tv"></label>
+    <label>Brew setpoint (&deg;C)   <input name="brew_sp"   id="brew_sp"></label>
+    <label>Steam setpoint (&deg;C)  <input name="steam_sp"  id="steam_sp"></label>
+    <label>Brew time (s)   <input name="brew_t"          id="brew_t"></label>
+    <label>Preinfusion (s) <input name="preinf_t"        id="preinf_t"></label>
+    <label>Preinf. pause (s) <input name="preinf_pause_t" id="preinf_pause_t"></label>
+    <label>MQTT host       <input name="mqtt_host"       id="mqtt_host"></label>
+    <label>MQTT port       <input name="mqtt_port"       id="mqtt_port"></label>
+    <button type="submit">Save Settings</button>
+  </form>
+
+  <p class="note">
+    Leave Wi-Fi password empty for open networks.
+    Machine settings are persisted in NVS.
+  </p>
+
+  <script src="/app.js"></script>
+</body>
+</html>

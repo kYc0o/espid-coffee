@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "driver/gpio.h"
@@ -91,6 +92,9 @@ constexpr std::uint32_t kTaskPriority   = 3;
 constexpr std::int32_t  kTaskCore       = 1;
 // Time in ms the shot result remains highlighted after the shot ends.
 constexpr std::uint32_t kPostShotHoldMs = 5000;
+constexpr float         kBrewTimeS      = 25.0F;
+constexpr float         kPreinfusionS   = 5.0F;
+constexpr float         kPreinfusionPauseS = 3.0F;
 }  // namespace brew
 
 // ---------------------------------------------------------------------------
@@ -98,6 +102,7 @@ constexpr std::uint32_t kPostShotHoldMs = 5000;
 // ---------------------------------------------------------------------------
 namespace pid {
 constexpr float         kSetpointC      = 95.0F;
+constexpr float         kSteamSetpointC = 140.0F;
 constexpr float         kKp             = 30.0F;
 constexpr float         kKi             = 0.4F;
 constexpr float         kKd             = 60.0F;
@@ -127,8 +132,16 @@ constexpr bool          kWifiEnabled    = true;
 constexpr const char*   kHostname       = "espid-coffee";
 constexpr const char*   kStaSsid        = "";
 constexpr const char*   kStaPassword    = "";
-constexpr const char*   kApSsid         = "ESPID-Coffee-Setup";
+constexpr const char*   kApSsid         = "ESPID-Coffee";
 constexpr const char*   kApPassword     = "EspidCoffee";
+constexpr bool          kHttpServerEnabled = true;
+constexpr std::uint16_t kHttpPort       = 80;
+constexpr std::size_t   kStaSsidMaxLen  = 32;
+constexpr std::size_t   kStaPasswordMaxLen = 64;
+constexpr std::size_t   kProvisionFormMaxLen = 256;
+constexpr const char*   kProvisionNvsNamespace = "wifi_cfg";
+constexpr const char*   kProvisionNvsStaSsidKey = "sta_ssid";
+constexpr const char*   kProvisionNvsStaPasswordKey = "sta_pass";
 constexpr std::uint8_t  kMaxReconnects  = 5;
 constexpr std::uint32_t kReconnectDelayMs = 10'000;
 constexpr bool          kOtaEnabled     = false;
