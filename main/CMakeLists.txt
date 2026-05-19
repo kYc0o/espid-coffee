@@ -14,6 +14,7 @@ idf_component_register(
         ssd1306
         brew
         wifi
+        heater
 )
 
 # Modern C++ for application code.

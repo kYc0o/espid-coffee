@@ -95,7 +95,7 @@ flowchart TB
         BREW["brew"]
         PID["pid"]
       WIFI["wifi (STA/AP fallback impl)"]
-        HEAT["heater (planned)"]
+        HEAT["heater (slow-PWM SSR)"]
         HTTPSVC["webui (planned)"]
         NVS["settings/NVS (planned)"]
     end
@@ -107,7 +107,7 @@ flowchart TB
         IZAC["IZacwireCapture"]
         IDSP["IDisplay"]
         INET["INetwork"]
-        IHEAT["IHeater (planned)"]
+        IHEAT["IHeater"]
     end
 
     subgraph IDF["ESP-IDF v6.0.1"]
@@ -125,7 +125,7 @@ flowchart TB
     APP_MAIN --> SSD
     APP_MAIN --> BREW
     APP_MAIN -. planned .-> PID
-    APP_MAIN -. planned .-> WIFI
+    APP_MAIN --> WIFI
     APP_MAIN -. planned .-> HEAT
 
     TSIC --> IZAC
@@ -326,7 +326,7 @@ If `get_idf` alias is unavailable in your shell:
 | 3b    | Wi-Fi STA + AP-fallback impl         | ✅ done  | `d8a3191` |
 | 3c    | Captive-portal credential capture    | ⏳ planned |     |
 | 3d    | `app_main` wiring + OLED Wi-Fi glyph | 🚧 active | this commit |
-| 4a    | `IHeater` HAL + slow-PWM SSR driver  | ⏳ planned |     |
+| 4a    | `IHeater` HAL + slow-PWM SSR driver  | ✅ done    | this commit |
 | 4b    | `control_task` running `pid::Controller` | ⏳ planned |  |
 | 5a    | Embedded web UI scaffold (`esp_http_server` + static assets) | ⏳ planned | |
 | 5b    | `/api/status`, `/api/config` JSON    | ⏳ planned |     |

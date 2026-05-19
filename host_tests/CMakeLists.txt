@@ -53,17 +53,25 @@ target_include_directories(espid_brew INTERFACE
     ${REPO_ROOT}/components/brew/include
 )
 
+# heater slow-PWM core is header-only and host-testable.
+add_library(espid_heater INTERFACE)
+target_include_directories(espid_heater INTERFACE
+    ${REPO_ROOT}/components/heater/include
+)
+
 # ---------------- Test binary ----------------
 add_executable(espid_unit_tests
     test_sanity.cpp
     test_tsic306_decoder.cpp
     test_pid.cpp
     test_brew.cpp
+    test_heater.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder
     espid_pid
     espid_brew
+    espid_heater
     GTest::gtest_main
     GTest::gmock
 )
