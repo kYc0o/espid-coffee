@@ -51,6 +51,7 @@ constexpr const char* kLogTag = "espid";
 namespace tsic {
 constexpr gpio_num_t    kDataGpio       = GPIO_NUM_1;
 constexpr std::uint32_t kFrameTimeoutMs = 500;
+constexpr std::uint32_t kMaxConsecutiveSensorErrors = 3;
 constexpr std::uint32_t kTaskStackBytes = 4096;
 constexpr std::uint32_t kTaskPriority   = 5;
 constexpr std::int32_t  kTaskCore       = 1;
@@ -95,6 +96,12 @@ constexpr std::uint32_t kPostShotHoldMs = 5000;
 constexpr float         kBrewTimeS      = 25.0F;
 constexpr float         kPreinfusionS   = 5.0F;
 constexpr float         kPreinfusionPauseS = 3.0F;
+constexpr float         kBrewTimeMinS      = 1.0F;
+constexpr float         kBrewTimeMaxS      = 120.0F;
+constexpr float         kPreinfusionMinS   = 0.0F;
+constexpr float         kPreinfusionMaxS   = 30.0F;
+constexpr float         kPreinfusionPauseMinS = 0.0F;
+constexpr float         kPreinfusionPauseMaxS = 30.0F;
 }  // namespace brew
 
 // ---------------------------------------------------------------------------
@@ -103,6 +110,8 @@ constexpr float         kPreinfusionPauseS = 3.0F;
 namespace pid {
 constexpr float         kSetpointC      = 95.0F;
 constexpr float         kSteamSetpointC = 140.0F;
+constexpr float         kEmergencyStopTempC = 120.0F;
+constexpr float         kEmergencyResetTempC = 100.0F;
 constexpr float         kKp             = 30.0F;
 constexpr float         kKi             = 0.4F;
 constexpr float         kKd             = 60.0F;
@@ -112,6 +121,19 @@ constexpr float         kIntegralMin    = -50.0F;
 constexpr float         kIntegralMax    = 50.0F;
 constexpr float         kSamplePeriodS  = 0.2F;   // 5 Hz loop
 constexpr float         kEmaFactor      = 0.6F;   // input smoothing for D term
+constexpr std::uint32_t kTaskStackBytes = 4096;
+constexpr std::uint32_t kTaskPriority   = 5;
+constexpr std::int32_t  kTaskCore       = 1;
+constexpr float         kKpMin          = 0.0F;
+constexpr float         kKpMax          = 200.0F;
+constexpr float         kTnMinS         = 0.1F;
+constexpr float         kTnMaxS         = 600.0F;
+constexpr float         kTvMinS         = 0.0F;
+constexpr float         kTvMaxS         = 120.0F;
+constexpr float         kSetpointMinC   = 70.0F;
+constexpr float         kSetpointMaxC   = 110.0F;
+constexpr float         kSteamSetpointMinC = 110.0F;
+constexpr float         kSteamSetpointMaxC = 170.0F;
 }  // namespace pid
 
 // ---------------------------------------------------------------------------
@@ -139,6 +161,7 @@ constexpr std::uint16_t kHttpPort       = 80;
 constexpr std::size_t   kStaSsidMaxLen  = 32;
 constexpr std::size_t   kStaPasswordMaxLen = 64;
 constexpr std::size_t   kProvisionFormMaxLen = 256;
+constexpr std::size_t   kWpaMinPasswordLen = 8;
 constexpr const char*   kProvisionNvsNamespace = "wifi_cfg";
 constexpr const char*   kProvisionNvsStaSsidKey = "sta_ssid";
 constexpr const char*   kProvisionNvsStaPasswordKey = "sta_pass";
@@ -154,6 +177,8 @@ namespace mqtt {
 constexpr bool          kEnabled        = false;
 constexpr const char*   kServerIp       = "0.0.0.0";
 constexpr std::uint16_t kServerPort     = 1883;
+constexpr std::uint16_t kServerPortMin  = 1;
+constexpr std::uint16_t kServerPortMax  = 65535;
 constexpr const char*   kUsername       = "";
 constexpr const char*   kPassword       = "";
 constexpr const char*   kTopicPrefix    = "espid/";

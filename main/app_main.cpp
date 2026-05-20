@@ -6,8 +6,10 @@
 // snapshot to the OLED at ~5 Hz.
 
 #include <atomic>
+#include <cctype>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -27,6 +29,8 @@
 #include "freertos/task.h"
 
 #include "hal_cpp/result.hpp"
+#include "heater/slow_pwm_ssr_heater.hpp"
+#include "pid/controller.hpp"
 #include "ssd1306/ssd1306_display.hpp"
 #include "tsic306/tsic306_decoder.hpp"
 #include "tsic306/tsic306_driver.hpp"
@@ -150,6 +154,7 @@ espid::ssd1306::Ssd1306Display::Rotation oled_rotation() {
 struct Snapshot {
     std::atomic<float>         temp_c{0.0F};
     std::atomic<std::uint16_t> raw{0};
+    std::atomic<std::uint64_t> timestamp_ms{0};
     std::atomic<bool>          valid{false};
 };
 
@@ -179,6 +184,27 @@ constexpr const char* kCfgPreinfusion = "preinf_t";
 constexpr const char* kCfgPreinfusionPause = "preinf_pause_t";
 constexpr const char* kCfgMqttHost = "mqtt_host";
 constexpr const char* kCfgMqttPort = "mqtt_port";
+
+float default_pid_tn_seconds() noexcept {
+    return (cfg::pid::kKi > 0.0F) ? (cfg::pid::kKp / cfg::pid::kKi) : 0.0F;
+}
+
+float default_pid_tv_seconds() noexcept {
+    return (cfg::pid::kKp > 0.0F) ? (cfg::pid::kKd / cfg::pid::kKp) : 0.0F;
+}
+
+struct RuntimeControlSettings {
+    std::atomic<float> pid_kp{cfg::pid::kKp};
+    std::atomic<float> pid_tn_s{default_pid_tn_seconds()};
+    std::atomic<float> pid_tv_s{default_pid_tv_seconds()};
+    std::atomic<float> brew_setpoint_c{cfg::pid::kSetpointC};
+    std::atomic<float> steam_setpoint_c{cfg::pid::kSteamSetpointC};
+};
+
+RuntimeControlSettings g_runtime_control;
+std::atomic<float> g_control_duty_pct{0.0F};
+std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
+std::atomic<bool> g_emergency_stop{false};
 
 int hex_value(char c) noexcept {
     if (c >= '0' && c <= '9') {
@@ -252,6 +278,77 @@ bool form_field(const char* body, const char* key,
 
     const std::size_t encoded_len = static_cast<std::size_t>(end - start);
     return url_decode_segment(start, encoded_len, out, out_len);
+}
+
+bool parse_float_in_range(const char* text,
+                          float min_v,
+                          float max_v,
+                          float* out) noexcept {
+    if (text == nullptr || out == nullptr || text[0] == '\0') {
+        return false;
+    }
+
+    char* end = nullptr;
+    const float v = std::strtof(text, &end);
+    if (end == text || (end != nullptr && *end != '\0') || !std::isfinite(v)) {
+        return false;
+    }
+    if (v < min_v || v > max_v) {
+        return false;
+    }
+
+    *out = v;
+    return true;
+}
+
+bool parse_u16_in_range(const char* text,
+                        std::uint16_t min_v,
+                        std::uint16_t max_v,
+                        std::uint16_t* out) noexcept {
+    if (text == nullptr || out == nullptr || text[0] == '\0') {
+        return false;
+    }
+
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(text, &end, 10);
+    if (end == text || (end != nullptr && *end != '\0')) {
+        return false;
+    }
+    if (v < static_cast<unsigned long>(min_v) ||
+        v > static_cast<unsigned long>(max_v)) {
+        return false;
+    }
+
+    *out = static_cast<std::uint16_t>(v);
+    return true;
+}
+
+bool valid_mqtt_host(const char* host) noexcept {
+    if (host == nullptr) {
+        return false;
+    }
+
+    for (const char* p = host; *p != '\0'; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        const bool allowed =
+            std::isalnum(c) != 0 || c == '.' || c == '-' || c == '_' || c == ':';
+        if (!allowed) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void publish_runtime_control_settings(float pid_kp,
+                                      float pid_tn_s,
+                                      float pid_tv_s,
+                                      float brew_setpoint_c,
+                                      float steam_setpoint_c) noexcept {
+    g_runtime_control.pid_kp.store(pid_kp, std::memory_order_relaxed);
+    g_runtime_control.pid_tn_s.store(pid_tn_s, std::memory_order_relaxed);
+    g_runtime_control.pid_tv_s.store(pid_tv_s, std::memory_order_relaxed);
+    g_runtime_control.brew_setpoint_c.store(brew_setpoint_c, std::memory_order_relaxed);
+    g_runtime_control.steam_setpoint_c.store(steam_setpoint_c, std::memory_order_relaxed);
 }
 
 bool save_sta_credentials_to_nvs(const char* ssid, const char* password) noexcept {
@@ -351,6 +448,39 @@ bool load_setting_from_nvs(const char* key, const char* fallback,
     const esp_err_t err = nvs_get_str(nvs, key, out, &len);
     nvs_close(nvs);
     return err == ESP_OK;
+}
+
+void load_runtime_control_settings_from_nvs() noexcept {
+    float pid_kp = cfg::pid::kKp;
+    float pid_tn = default_pid_tn_seconds();
+    float pid_tv = default_pid_tv_seconds();
+    float brew_sp = cfg::pid::kSetpointC;
+    float steam_sp = cfg::pid::kSteamSetpointC;
+
+    char value[32];
+    if (load_setting_from_nvs(kCfgPidKp, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value, cfg::pid::kKpMin, cfg::pid::kKpMax, &pid_kp);
+    }
+    if (load_setting_from_nvs(kCfgPidTn, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value, cfg::pid::kTnMinS, cfg::pid::kTnMaxS, &pid_tn);
+    }
+    if (load_setting_from_nvs(kCfgPidTv, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &pid_tv);
+    }
+    if (load_setting_from_nvs(kCfgBrewSetpoint, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value,
+                                   cfg::pid::kSetpointMinC,
+                                   cfg::pid::kSetpointMaxC,
+                                   &brew_sp);
+    }
+    if (load_setting_from_nvs(kCfgSteamSetpoint, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value,
+                                   cfg::pid::kSteamSetpointMinC,
+                                   cfg::pid::kSteamSetpointMaxC,
+                                   &steam_sp);
+    }
+
+    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp);
 }
 
 void restart_task(void* /*arg*/) {
@@ -521,9 +651,27 @@ esp_err_t wifi_post_handler(httpd_req_t* req) {
         password[0] = '\0';
     }
 
+    const std::size_t ssid_len = std::strlen(ssid);
+    const std::size_t pass_len = std::strlen(password);
+    if (ssid_len == 0 || ssid_len > cfg::net::kStaSsidMaxLen) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, "Invalid SSID length", HTTPD_RESP_USE_STRLEN);
+    }
+    if (pass_len > cfg::net::kStaPasswordMaxLen) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, "Invalid password length", HTTPD_RESP_USE_STRLEN);
+    }
+    if (pass_len > 0 && pass_len < cfg::net::kWpaMinPasswordLen) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, "Password too short", HTTPD_RESP_USE_STRLEN);
+    }
+
     if (!save_sta_credentials_to_nvs(ssid, password)) {
         return httpd_resp_send_500(req);
     }
+
+    std::snprintf(g_saved_sta_ssid, sizeof(g_saved_sta_ssid), "%s", ssid);
+    std::snprintf(g_saved_sta_password, sizeof(g_saved_sta_password), "%s", password);
 
     ESP_LOGI(kTag, "Wi-Fi credentials saved (ssid=%s), rebooting", ssid);
 
@@ -562,36 +710,145 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     }
     body[read_total] = '\0';
 
+    const auto reject_bad_request = [req](const char* msg) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+    };
+
+    char pid_kp_txt[16]{};
+    char pid_tn_txt[16]{};
+    char pid_tv_txt[16]{};
+    char brew_sp_txt[16]{};
+    char steam_sp_txt[16]{};
+    char brew_t_txt[16]{};
+    char preinf_t_txt[16]{};
+    char preinf_pause_txt[16]{};
+    char mqtt_host_txt[64]{};
+    char mqtt_port_txt[8]{};
+
+    if (!form_field(body, "pid_kp", pid_kp_txt, sizeof(pid_kp_txt))) {
+        return reject_bad_request("Missing pid_kp");
+    }
+    if (!form_field(body, "pid_tn", pid_tn_txt, sizeof(pid_tn_txt))) {
+        return reject_bad_request("Missing pid_tn");
+    }
+    if (!form_field(body, "pid_tv", pid_tv_txt, sizeof(pid_tv_txt))) {
+        return reject_bad_request("Missing pid_tv");
+    }
+    if (!form_field(body, "brew_sp", brew_sp_txt, sizeof(brew_sp_txt))) {
+        return reject_bad_request("Missing brew_sp");
+    }
+    if (!form_field(body, "steam_sp", steam_sp_txt, sizeof(steam_sp_txt))) {
+        return reject_bad_request("Missing steam_sp");
+    }
+    if (!form_field(body, "brew_t", brew_t_txt, sizeof(brew_t_txt))) {
+        return reject_bad_request("Missing brew_t");
+    }
+    if (!form_field(body, "preinf_t", preinf_t_txt, sizeof(preinf_t_txt))) {
+        return reject_bad_request("Missing preinf_t");
+    }
+    if (!form_field(body, "preinf_pause_t", preinf_pause_txt, sizeof(preinf_pause_txt))) {
+        return reject_bad_request("Missing preinf_pause_t");
+    }
+    if (!form_field(body, "mqtt_host", mqtt_host_txt, sizeof(mqtt_host_txt))) {
+        return reject_bad_request("Missing mqtt_host");
+    }
+    if (!form_field(body, "mqtt_port", mqtt_port_txt, sizeof(mqtt_port_txt))) {
+        return reject_bad_request("Missing mqtt_port");
+    }
+
+    float pid_kp = 0.0F;
+    float pid_tn = 0.0F;
+    float pid_tv = 0.0F;
+    float brew_sp = 0.0F;
+    float steam_sp = 0.0F;
+    float brew_t = 0.0F;
+    float preinf_t = 0.0F;
+    float preinf_pause_t = 0.0F;
+    std::uint16_t mqtt_port = 0;
+
+    if (!parse_float_in_range(pid_kp_txt, cfg::pid::kKpMin, cfg::pid::kKpMax, &pid_kp)) {
+        return reject_bad_request("Invalid pid_kp");
+    }
+    if (!parse_float_in_range(pid_tn_txt, cfg::pid::kTnMinS, cfg::pid::kTnMaxS, &pid_tn)) {
+        return reject_bad_request("Invalid pid_tn");
+    }
+    if (!parse_float_in_range(pid_tv_txt, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &pid_tv)) {
+        return reject_bad_request("Invalid pid_tv");
+    }
+    if (!parse_float_in_range(brew_sp_txt,
+                              cfg::pid::kSetpointMinC,
+                              cfg::pid::kSetpointMaxC,
+                              &brew_sp)) {
+        return reject_bad_request("Invalid brew_sp");
+    }
+    if (!parse_float_in_range(steam_sp_txt,
+                              cfg::pid::kSteamSetpointMinC,
+                              cfg::pid::kSteamSetpointMaxC,
+                              &steam_sp)) {
+        return reject_bad_request("Invalid steam_sp");
+    }
+    if (!parse_float_in_range(brew_t_txt,
+                              cfg::brew::kBrewTimeMinS,
+                              cfg::brew::kBrewTimeMaxS,
+                              &brew_t)) {
+        return reject_bad_request("Invalid brew_t");
+    }
+    if (!parse_float_in_range(preinf_t_txt,
+                              cfg::brew::kPreinfusionMinS,
+                              cfg::brew::kPreinfusionMaxS,
+                              &preinf_t)) {
+        return reject_bad_request("Invalid preinf_t");
+    }
+    if (!parse_float_in_range(preinf_pause_txt,
+                              cfg::brew::kPreinfusionPauseMinS,
+                              cfg::brew::kPreinfusionPauseMaxS,
+                              &preinf_pause_t)) {
+        return reject_bad_request("Invalid preinf_pause_t");
+    }
+    if (!parse_u16_in_range(mqtt_port_txt,
+                            cfg::mqtt::kServerPortMin,
+                            cfg::mqtt::kServerPortMax,
+                            &mqtt_port)) {
+        return reject_bad_request("Invalid mqtt_port");
+    }
+    if (!valid_mqtt_host(mqtt_host_txt)) {
+        return reject_bad_request("Invalid mqtt_host");
+    }
+
+    // Parsed and range-checked now; runtime wiring is phased for these fields.
+    (void)brew_t;
+    (void)preinf_t;
+    (void)preinf_pause_t;
+    (void)mqtt_port;
+
     nvs_handle_t nvs{};
     esp_err_t err = nvs_open(kCfgNvsNamespace, NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
         return httpd_resp_send_500(req);
     }
 
-    char value[64]{};
-    const struct Field {
-        const char* form_name;
-        const char* nvs_key;
-    } fields[] = {
-        {"pid_kp", kCfgPidKp},
-        {"pid_tn", kCfgPidTn},
-        {"pid_tv", kCfgPidTv},
-        {"brew_sp", kCfgBrewSetpoint},
-        {"steam_sp", kCfgSteamSetpoint},
-        {"brew_t", kCfgBrewTime},
-        {"preinf_t", kCfgPreinfusion},
-        {"preinf_pause_t", kCfgPreinfusionPause},
-        {"mqtt_host", kCfgMqttHost},
-        {"mqtt_port", kCfgMqttPort},
+    const struct Entry {
+        const char* key;
+        const char* value;
+    } entries[] = {
+        {kCfgPidKp, pid_kp_txt},
+        {kCfgPidTn, pid_tn_txt},
+        {kCfgPidTv, pid_tv_txt},
+        {kCfgBrewSetpoint, brew_sp_txt},
+        {kCfgSteamSetpoint, steam_sp_txt},
+        {kCfgBrewTime, brew_t_txt},
+        {kCfgPreinfusion, preinf_t_txt},
+        {kCfgPreinfusionPause, preinf_pause_txt},
+        {kCfgMqttHost, mqtt_host_txt},
+        {kCfgMqttPort, mqtt_port_txt},
     };
 
-    for (const auto& f : fields) {
-        if (form_field(body, f.form_name, value, sizeof(value))) {
-            err = nvs_set_str(nvs, f.nvs_key, value);
-            if (err != ESP_OK) {
-                nvs_close(nvs);
-                return httpd_resp_send_500(req);
-            }
+    for (const auto& e : entries) {
+        err = nvs_set_str(nvs, e.key, e.value);
+        if (err != ESP_OK) {
+            nvs_close(nvs);
+            return httpd_resp_send_500(req);
         }
     }
 
@@ -600,6 +857,8 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     if (err != ESP_OK) {
         return httpd_resp_send_500(req);
     }
+
+    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req,
@@ -710,6 +969,11 @@ void sensor_task(void* arg) {
     for (;;) {
         const auto fr = ctx->driver->next_frame(cfg::tsic::kFrameTimeoutMs);
         if (!fr.ok()) {
+            const std::uint32_t errors =
+                g_sensor_consecutive_errors.fetch_add(1, std::memory_order_relaxed) + 1U;
+            if (errors >= cfg::tsic::kMaxConsecutiveSensorErrors) {
+                g_snapshot.valid.store(false, std::memory_order_release);
+            }
             ESP_LOGW(kTag, "capture error: %s",
                      espid::hal_cpp::to_string(fr.error()));
             ctx->decoder->reset();
@@ -718,18 +982,143 @@ void sensor_task(void* arg) {
         const auto& frame = fr.value();
         const auto  dec   = ctx->decoder->decode(frame);
         if (!dec.ok()) {
+            const std::uint32_t errors =
+                g_sensor_consecutive_errors.fetch_add(1, std::memory_order_relaxed) + 1U;
+            if (errors >= cfg::tsic::kMaxConsecutiveSensorErrors) {
+                g_snapshot.valid.store(false, std::memory_order_release);
+            }
             ESP_LOGW(kTag, "decode error: %s  raw=0x%04X parity=0x%X",
                      espid::hal_cpp::to_string(dec.error()),
                      frame.raw, frame.parity_mask);
             continue;
         }
         const float t = dec.value();
+        g_sensor_consecutive_errors.store(0U, std::memory_order_relaxed);
         g_snapshot.temp_c.store(t, std::memory_order_relaxed);
         g_snapshot.raw.store(frame.raw, std::memory_order_relaxed);
+        g_snapshot.timestamp_ms.store(frame.timestamp_us / 1000U,
+                                      std::memory_order_relaxed);
         g_snapshot.valid.store(true, std::memory_order_release);
 
         ESP_LOGI(kTag, "T=%.2f C  raw=0x%04X  ts=%" PRIu64 " us",
                  static_cast<double>(t), frame.raw, frame.timestamp_us);
+    }
+}
+
+void control_task(void* arg) {
+    auto* heater = static_cast<espid::heater::SlowPwmSsrHeater*>(arg);
+    ESP_LOGI(kTag, "control_task: running on core %d", xPortGetCoreID());
+
+    espid::pid::Controller controller;
+    bool heater_ready = false;
+
+    if (cfg::heater::kEnabled && heater != nullptr) {
+        espid::hal_cpp::IHeater::Config hcfg{};
+        hcfg.ssr_gpio = static_cast<int>(cfg::heater::kSsrGpio);
+        hcfg.active_high = cfg::heater::kSsrActiveHigh;
+        hcfg.pwm_period_ms = cfg::heater::kPwmPeriodMs;
+        const auto hs = heater->init(hcfg);
+        if (hs.ok()) {
+            heater_ready = true;
+            ESP_LOGI(kTag, "heater initialised on gpio=%d", hcfg.ssr_gpio);
+        } else {
+            ESP_LOGE(kTag, "heater init failed: %s",
+                     espid::hal_cpp::to_string(hs.error()));
+        }
+    }
+
+    std::uint32_t period_ms = static_cast<std::uint32_t>(
+        cfg::pid::kSamplePeriodS * 1000.0F);
+    if (period_ms == 0) {
+        period_ms = 1;
+    }
+    const TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
+
+    std::uint32_t log_div = 0;
+    for (;;) {
+        const std::uint64_t now_ms =
+            static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        const bool valid = g_snapshot.valid.load(std::memory_order_acquire);
+        const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
+        const std::uint64_t sample_ms =
+            g_snapshot.timestamp_ms.load(std::memory_order_relaxed);
+
+        const std::uint64_t freshness_budget_ms =
+            static_cast<std::uint64_t>(cfg::pid::kSamplePeriodS * 3000.0F);
+        const bool sample_fresh =
+            valid && sample_ms > 0U && now_ms >= sample_ms &&
+            (now_ms - sample_ms) <= freshness_budget_ms;
+
+        if (sample_fresh && temp_c >= cfg::pid::kEmergencyStopTempC) {
+            const bool was_stopped = g_emergency_stop.exchange(true, std::memory_order_relaxed);
+            if (!was_stopped) {
+                ESP_LOGE(kTag, "EMERGENCY STOP: temp %.2fC >= %.2fC",
+                         static_cast<double>(temp_c),
+                         static_cast<double>(cfg::pid::kEmergencyStopTempC));
+            }
+        } else if (g_emergency_stop.load(std::memory_order_relaxed) &&
+                   sample_fresh &&
+                   temp_c <= cfg::pid::kEmergencyResetTempC) {
+            g_emergency_stop.store(false, std::memory_order_relaxed);
+            ESP_LOGW(kTag, "Emergency stop reset: temp %.2fC <= %.2fC",
+                     static_cast<double>(temp_c),
+                     static_cast<double>(cfg::pid::kEmergencyResetTempC));
+        }
+        const bool emergency_stop = g_emergency_stop.load(std::memory_order_relaxed);
+
+        const float pid_kp = g_runtime_control.pid_kp.load(std::memory_order_relaxed);
+        const float pid_tn_s = g_runtime_control.pid_tn_s.load(std::memory_order_relaxed);
+        const float pid_tv_s = g_runtime_control.pid_tv_s.load(std::memory_order_relaxed);
+        const float brew_setpoint_c =
+            g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
+
+        espid::pid::Controller::Config pcfg{};
+        pcfg.kp = pid_kp;
+        pcfg.ki = (pid_tn_s > 0.0F) ? (pid_kp / pid_tn_s) : 0.0F;
+        pcfg.kd = pid_kp * pid_tv_s;
+        pcfg.output_min = cfg::pid::kOutputMin;
+        pcfg.output_max = cfg::pid::kOutputMax;
+        pcfg.integral_min = cfg::pid::kIntegralMin;
+        pcfg.integral_max = cfg::pid::kIntegralMax;
+        pcfg.sample_period_s = cfg::pid::kSamplePeriodS;
+        controller.set_config(pcfg);
+
+        float duty_pct = 0.0F;
+        if (sample_fresh && std::isfinite(temp_c) && !emergency_stop) {
+            duty_pct = controller.update(brew_setpoint_c, temp_c);
+        } else {
+            controller.reset();
+            duty_pct = 0.0F;
+        }
+
+        if (heater_ready) {
+            auto hs = heater->set_duty_pct(duty_pct);
+            if (hs.ok()) {
+                hs = heater->step(now_ms);
+            }
+            if (!hs.ok()) {
+                heater_ready = false;
+                ESP_LOGE(kTag, "heater drive failed: %s",
+                         espid::hal_cpp::to_string(hs.error()));
+                duty_pct = 0.0F;
+            }
+        } else {
+            duty_pct = 0.0F;
+        }
+
+        g_control_duty_pct.store(duty_pct, std::memory_order_relaxed);
+
+        if ((++log_div % 10U) == 0U) {
+            ESP_LOGI(kTag, "control: sp=%.2fC pv=%.2fC duty=%.1f%% fresh=%d estop=%d serr=%" PRIu32,
+                     static_cast<double>(brew_setpoint_c),
+                     static_cast<double>(temp_c),
+                     static_cast<double>(duty_pct),
+                     sample_fresh ? 1 : 0,
+                     emergency_stop ? 1 : 0,
+                     g_sensor_consecutive_errors.load(std::memory_order_relaxed));
+        }
+
+        vTaskDelay(period_ticks);
     }
 }
 
@@ -870,6 +1259,7 @@ extern "C" void app_main(void) {
     static espid::tsic306::Tsic306Decoder decoder;
     static espid::ssd1306::Ssd1306Display display;
     static espid::wifi::EspWifiNetwork     wifi;
+    static espid::heater::SlowPwmSsrHeater heater;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
@@ -926,6 +1316,8 @@ extern "C" void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
             }
         } else {
+            load_runtime_control_settings_from_nvs();
+
             espid::hal_cpp::INetwork::Config wifi_cfg{};
             const bool has_saved_sta = load_sta_credentials_from_nvs(
                 g_saved_sta_ssid, sizeof(g_saved_sta_ssid),
@@ -993,6 +1385,16 @@ extern "C" void app_main(void) {
         cfg::tsic::kTaskPriority, nullptr, cfg::tsic::kTaskCore);
     if (ok != pdPASS) {
         ESP_LOGE(kTag, "sensor_task create failed - halting");
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    ok = xTaskCreatePinnedToCore(
+        &control_task, "control", cfg::pid::kTaskStackBytes, &heater,
+        cfg::pid::kTaskPriority, nullptr, cfg::pid::kTaskCore);
+    if (ok != pdPASS) {
+        ESP_LOGE(kTag, "control_task create failed - halting");
         for (;;) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }

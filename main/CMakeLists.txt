@@ -17,6 +17,7 @@ idf_component_register(
         brew
         wifi
         heater
+        pid
 )
 
 # Modern C++ for application code.
