@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdio>
 
+#include "abp2/abp2_driver.hpp"
 #include "brew/brew_button.hpp"
 #include "brew/shot_timer.hpp"
 #include "config.hpp"
@@ -168,6 +169,18 @@ struct ShotSnapshot {
 };
 
 ShotSnapshot g_shot;
+
+// Pressure snapshot published by pressure_task.
+struct PressureSnapshot {
+    std::atomic<float>         pressure_bar{0.0F};
+    std::atomic<float>         pressure_psi{0.0F};
+    std::atomic<float>         sensor_temp_c{0.0F};
+    std::atomic<std::uint32_t> pressure_counts{0};
+    std::atomic<bool>          stale{false};
+    std::atomic<bool>          valid{false};
+};
+
+PressureSnapshot g_pressure;
 espid::hal_cpp::INetwork* g_network = nullptr;
 httpd_handle_t g_http_server = nullptr;
 char g_saved_sta_ssid[cfg::net::kStaSsidMaxLen + 1]{};
@@ -204,6 +217,7 @@ struct RuntimeControlSettings {
 RuntimeControlSettings g_runtime_control;
 std::atomic<float> g_control_duty_pct{0.0F};
 std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
+std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
 std::atomic<bool> g_emergency_stop{false};
 
 int hex_value(char c) noexcept {
@@ -999,9 +1013,96 @@ void sensor_task(void* arg) {
         g_snapshot.timestamp_ms.store(frame.timestamp_us / 1000U,
                                       std::memory_order_relaxed);
         g_snapshot.valid.store(true, std::memory_order_release);
+    }
+}
 
-        ESP_LOGI(kTag, "T=%.2f C  raw=0x%04X  ts=%" PRIu64 " us",
-                 static_cast<double>(t), frame.raw, frame.timestamp_us);
+struct PressureTaskCtx {
+    espid::abp2::Abp2Driver* driver;
+};
+
+void pressure_task(void* arg) {
+    auto* ctx = static_cast<PressureTaskCtx*>(arg);
+    ESP_LOGI(kTag, "pressure_task: running on core %d", xPortGetCoreID());
+
+    std::uint32_t log_div = 0;
+    for (;;) {
+        const auto sample = ctx->driver->read_sample();
+        if (!sample.ok()) {
+            const std::uint32_t errors =
+                g_pressure_consecutive_errors.fetch_add(1, std::memory_order_relaxed) + 1U;
+            if (errors >= cfg::pressure::kMaxConsecutiveErrors) {
+                g_pressure.valid.store(false, std::memory_order_release);
+            }
+            if (errors == 1U || (errors % 10U) == 0U) {
+                ESP_LOGW(kTag, "pressure read error: %s (n=%" PRIu32 ")",
+                         espid::hal_cpp::to_string(sample.error()), errors);
+            }
+
+            if ((sample.error() == espid::hal_cpp::Error::kRangeError ||
+                 sample.error() == espid::hal_cpp::Error::kHardwareFault) &&
+                (errors <= 5U || (errors % 50U) == 0U)) {
+                std::uint8_t raw[7]{};
+                if (ctx->driver->last_raw_frame(raw)) {
+                    const std::uint8_t status_bits =
+                        static_cast<std::uint8_t>((raw[0] >> 6) & 0x03U);
+                    const std::uint32_t pressure_counts =
+                        static_cast<std::uint32_t>((static_cast<std::uint32_t>(raw[1]) << 16) |
+                                                   (static_cast<std::uint32_t>(raw[2]) << 8) |
+                                                   static_cast<std::uint32_t>(raw[3]));
+                    const std::uint32_t temperature_counts =
+                        static_cast<std::uint32_t>((static_cast<std::uint32_t>(raw[4]) << 16) |
+                                                   (static_cast<std::uint32_t>(raw[5]) << 8) |
+                                                   static_cast<std::uint32_t>(raw[6]));
+
+                    const char* status_label = "unknown";
+                    switch (status_bits) {
+                        case 0U: status_label = "normal"; break;
+                        case 1U: status_label = "command"; break;
+                        case 2U: status_label = "stale"; break;
+                        case 3U: status_label = "diagnostic"; break;
+                        default: break;
+                    }
+
+                    ESP_LOGW(kTag,
+                             "pressure raw=[%02X %02X %02X %02X %02X %02X %02X] status=%s(%u) p_counts=%u t_counts=%u tf=[%u..%u]",
+                             static_cast<unsigned>(raw[0]),
+                             static_cast<unsigned>(raw[1]),
+                             static_cast<unsigned>(raw[2]),
+                             static_cast<unsigned>(raw[3]),
+                             static_cast<unsigned>(raw[4]),
+                             static_cast<unsigned>(raw[5]),
+                             static_cast<unsigned>(raw[6]),
+                             status_label,
+                             static_cast<unsigned>(status_bits),
+                             static_cast<unsigned>(pressure_counts),
+                             static_cast<unsigned>(temperature_counts),
+                             static_cast<unsigned>(cfg::pressure::kOutputMinCounts),
+                             static_cast<unsigned>(cfg::pressure::kOutputMaxCounts));
+                }
+            }
+        } else {
+            const auto& s = sample.value();
+            const bool stale_sample = (s.status == espid::abp2::FrameStatus::kStaleData);
+            g_pressure_consecutive_errors.store(0U, std::memory_order_relaxed);
+            g_pressure.pressure_bar.store(s.pressure_bar, std::memory_order_relaxed);
+            g_pressure.pressure_psi.store(s.pressure_psi, std::memory_order_relaxed);
+            g_pressure.sensor_temp_c.store(s.temperature_c, std::memory_order_relaxed);
+            g_pressure.pressure_counts.store(s.pressure_counts, std::memory_order_relaxed);
+            g_pressure.stale.store(stale_sample, std::memory_order_relaxed);
+            g_pressure.valid.store(true, std::memory_order_release);
+
+            if ((++log_div % 20U) == 0U) {
+                ESP_LOGI(kTag,
+                         "pressure: p=%.3fbar psi=%.2f status=%u stale=%d perr=%" PRIu32,
+                         static_cast<double>(s.pressure_bar),
+                         static_cast<double>(s.pressure_psi),
+                         static_cast<unsigned>(s.status),
+                         stale_sample ? 1 : 0,
+                         g_pressure_consecutive_errors.load(std::memory_order_relaxed));
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(cfg::pressure::kReadPeriodMs));
     }
 }
 
@@ -1109,9 +1210,7 @@ void control_task(void* arg) {
         g_control_duty_pct.store(duty_pct, std::memory_order_relaxed);
 
         if ((++log_div % 10U) == 0U) {
-            ESP_LOGI(kTag, "control: sp=%.2fC pv=%.2fC duty=%.1f%% fresh=%d estop=%d serr=%" PRIu32,
-                     static_cast<double>(brew_setpoint_c),
-                     static_cast<double>(temp_c),
+            ESP_LOGI(kTag, "control: duty=%.1f%% fresh=%d estop=%d serr=%" PRIu32,
                      static_cast<double>(duty_pct),
                      sample_fresh ? 1 : 0,
                      emergency_stop ? 1 : 0,
@@ -1260,6 +1359,7 @@ extern "C" void app_main(void) {
     static espid::ssd1306::Ssd1306Display display;
     static espid::wifi::EspWifiNetwork     wifi;
     static espid::heater::SlowPwmSsrHeater heater;
+    static espid::abp2::Abp2Driver         pressure;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
@@ -1299,6 +1399,30 @@ extern "C" void app_main(void) {
                           cfg::kFirmwareName);
         display.draw_text(32, 50, espid::hal_cpp::Font::kSmall, ver);
         (void)display.flush();
+    }
+
+    bool pressure_ready = false;
+    if (cfg::pressure::kEnabled) {
+        espid::abp2::Abp2Driver::Config pcfg{};
+        pcfg.i2c_port = static_cast<int>(cfg::pressure::kI2cBusNum);
+        pcfg.sda = cfg::pressure::kSdaGpio;
+        pcfg.scl = cfg::pressure::kSclGpio;
+        pcfg.i2c_freq_hz = cfg::pressure::kI2cFreqHz;
+        pcfg.i2c_addr_7bit = cfg::pressure::kI2cAddr7bit;
+        pcfg.timeout_ms = cfg::pressure::kI2cTimeoutMs;
+        pcfg.command_delay_ms = cfg::pressure::kCommandDelayMs;
+        pcfg.transfer.output_min_counts = cfg::pressure::kOutputMinCounts;
+        pcfg.transfer.output_max_counts = cfg::pressure::kOutputMaxCounts;
+        pcfg.transfer.pressure_min_psi = cfg::pressure::kPressureMinPsi;
+        pcfg.transfer.pressure_max_psi = cfg::pressure::kPressureMaxPsi;
+
+        const auto ps = pressure.init(pcfg);
+        if (!ps.ok()) {
+            ESP_LOGW(kTag, "ABP2 init failed: %s - pressure disabled",
+                     espid::hal_cpp::to_string(ps.error()));
+        } else {
+            pressure_ready = true;
+        }
     }
 
     if (cfg::net::kWifiEnabled) {
@@ -1397,6 +1521,17 @@ extern "C" void app_main(void) {
         ESP_LOGE(kTag, "control_task create failed - halting");
         for (;;) {
             vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    if (pressure_ready) {
+        static PressureTaskCtx pressure_ctx{&pressure};
+        ok = xTaskCreatePinnedToCore(
+            &pressure_task, "pressure", cfg::pressure::kTaskStackBytes,
+            &pressure_ctx, cfg::pressure::kTaskPriority, nullptr,
+            cfg::pressure::kTaskCore);
+        if (ok != pdPASS) {
+            ESP_LOGW(kTag, "pressure_task create failed - continuing without pressure");
         }
     }
 

@@ -41,6 +41,14 @@ target_include_directories(espid_tsic306_decoder PUBLIC
     ${REPO_ROOT}/components/hal_cpp/include
 )
 
+add_library(espid_abp2_decoder STATIC
+    ${REPO_ROOT}/components/abp2/src/abp2_decoder.cpp
+)
+target_include_directories(espid_abp2_decoder PUBLIC
+    ${REPO_ROOT}/components/abp2/include
+    ${REPO_ROOT}/components/hal_cpp/include
+)
+
 # pid is header-only; expose its include dir as an INTERFACE target.
 add_library(espid_pid INTERFACE)
 target_include_directories(espid_pid INTERFACE
@@ -63,12 +71,14 @@ target_include_directories(espid_heater INTERFACE
 add_executable(espid_unit_tests
     test_sanity.cpp
     test_tsic306_decoder.cpp
+    test_abp2_decoder.cpp
     test_pid.cpp
     test_brew.cpp
     test_heater.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder
+    espid_abp2_decoder
     espid_pid
     espid_brew
     espid_heater

@@ -35,7 +35,7 @@ components, and atomic Conventional-Commits commits.
 | Brew button       | Active-low, HW-debounced (RC + Schmitt) on **GPIO 5**, internal pull-up enabled as fallback |
 | Heater SSR        | _planned_ — GPIO 15 (slow-PWM, 1 s period)                |
 | Pump / valve SSR  | _planned_ — TBD                                           |
-| Pressure sensor   | _planned_ — TBD                                           |
+| Pressure sensor   | Honeywell ABP2, I2C addr 0x28 (shared bus SDA=8 / SCL=9) |
 | Load cell (scale) | _planned_ — HX711, TBD                                    |
 
 Pin allocation rationale: GPIO 0/3/45/46 are strapping; 19/20 = USB-JTAG;
@@ -68,6 +68,7 @@ ESPID-Coffee/
 │   ├── ssd1306/                  # U8g2-backed IDisplay implementation
 │   ├── wifi/                     # esp_wifi INetwork impl (STA + AP fallback)
 │   ├── pid/                      # header-only discrete PID controller
+│   ├── abp2/                     # ABP2 pressure sensor driver + decoder
 │   └── brew/                     # debounced brew button + shot timer (header-only)
 ├── host_tests/                   # GoogleTest harness, ESP-IDF Linux target
 │   ├── CMakeLists.txt
@@ -166,6 +167,7 @@ Rules:
 | `sensor`      |  1   |    5     | 4096 B | event    | TSIC capture + decode → snapshot   |
 | `display`     |  1   |    4     | 4096 B | 200 ms   | OLED render from snapshot          |
 | `button`      |  1   |    3     | 3072 B |  10 ms   | Brew button debounce → shot timer  |
+| `pressure`    |  1   |    4     | 4096 B | 200 ms   | ABP2 polling + pressure snapshot   |
 | `heartbeat`   | idle | (main)   |  —     | 5000 ms  | `app_main`, proof-of-life log      |
 | `control`     |   ?  |    ?     |   ?    |  200 ms  | _planned_ — PID loop driving heater|
 | `wifi-evt`    |  0   | esp-wifi | (IDF)  | event    | _planned_ — esp_event task         |

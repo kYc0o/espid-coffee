@@ -137,7 +137,7 @@ constexpr float         kSteamSetpointMaxC = 170.0F;
 }  // namespace pid
 
 // ---------------------------------------------------------------------------
-// Heater (stub — slow-PWM SSR not yet implemented)
+// Heater (slow-PWM SSR)
 // ---------------------------------------------------------------------------
 namespace heater {
 constexpr bool          kEnabled        = false;
@@ -145,6 +145,33 @@ constexpr gpio_num_t    kSsrGpio        = GPIO_NUM_15;
 constexpr bool          kSsrActiveHigh  = true;
 constexpr std::uint32_t kPwmPeriodMs    = 1000;
 }  // namespace heater
+
+// ---------------------------------------------------------------------------
+// Pressure sensor (Honeywell ABP2, I2C)
+// ---------------------------------------------------------------------------
+namespace pressure {
+constexpr bool          kEnabled              = true;
+constexpr std::uint8_t  kI2cAddr7bit          = 0x28;
+constexpr std::uint8_t  kI2cBusNum            = oled::kI2cBusNum;
+constexpr gpio_num_t    kSdaGpio              = oled::kSdaGpio;
+constexpr gpio_num_t    kSclGpio              = oled::kSclGpio;
+constexpr std::uint32_t kI2cFreqHz            = 100'000;
+constexpr std::uint32_t kI2cTimeoutMs         = 50;
+constexpr std::uint32_t kCommandDelayMs       = 10;
+constexpr std::uint32_t kReadPeriodMs         = 200;
+constexpr std::uint32_t kTaskStackBytes       = 4096;
+constexpr std::uint32_t kTaskPriority         = 4;
+constexpr std::int32_t  kTaskCore             = 1;
+constexpr std::uint32_t kMaxConsecutiveErrors = 5;
+
+// ABP2LANT010BG2A3XX transfer counts (10%-90% of 24-bit full scale).
+constexpr std::uint32_t kOutputMinCounts = 1'677'722;
+constexpr std::uint32_t kOutputMaxCounts = 15'099'494;
+
+// Engineering span for ABP2LANT010BG2A3XX (0..10 bar).
+constexpr float         kPressureMinPsi = 0.0F;
+constexpr float         kPressureMaxPsi = 145.038F;
+}  // namespace pressure
 
 // ---------------------------------------------------------------------------
 // Networking (stub — Wi-Fi / web UI not yet implemented)

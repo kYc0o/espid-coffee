@@ -18,6 +18,7 @@ idf_component_register(
         wifi
         heater
         pid
+        abp2
 )
 
 # Modern C++ for application code.
