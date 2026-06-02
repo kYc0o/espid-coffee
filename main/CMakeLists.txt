@@ -3,6 +3,9 @@ idf_component_register(
         "app_main.cpp"
     INCLUDE_DIRS
         "."
+    EMBED_TXTFILES
+        "mqtt_client.crt"
+        "mqtt_client.key"
     REQUIRES
         esp_system
         esp_timer
