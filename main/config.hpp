@@ -72,6 +72,7 @@ constexpr std::uint16_t kHeightPx       = 64;
 // 0 = normal, 1 = 90° CW, 2 = 180°, 3 = 270° CW.
 constexpr std::uint8_t  kRotationQuadrants = 2;
 constexpr std::uint32_t kRefreshPeriodMs   = 200;
+constexpr std::uint32_t kI2cLockTimeoutMs  = 50;
 constexpr std::uint32_t kSplashDurationMs  = 2000;
 constexpr std::uint32_t kTaskStackBytes    = 4096;
 constexpr std::uint32_t kTaskPriority      = 4;
@@ -159,6 +160,8 @@ constexpr std::uint32_t kI2cFreqHz            = 100'000;
 constexpr std::uint32_t kI2cTimeoutMs         = 50;
 constexpr std::uint32_t kCommandDelayMs       = 10;
 constexpr std::uint32_t kReadPeriodMs         = 200;
+constexpr std::uint32_t kReadRetryCount       = 1;
+constexpr std::uint32_t kReadRetryDelayMs     = 5;
 constexpr std::uint32_t kTaskStackBytes       = 4096;
 constexpr std::uint32_t kTaskPriority         = 4;
 constexpr std::int32_t  kTaskCore             = 1;
@@ -201,16 +204,35 @@ constexpr bool          kOtaEnabled     = false;
 // MQTT (stub)
 // ---------------------------------------------------------------------------
 namespace mqtt {
-constexpr bool          kEnabled        = false;
-constexpr const char*   kServerIp       = "0.0.0.0";
-constexpr std::uint16_t kServerPort     = 1883;
+constexpr bool          kEnabled        = true;
+constexpr bool          kUseTls         = true;
+constexpr const char*   kServerIp       = "hono.lizher.eu";
+constexpr std::uint16_t kServerPort     = 8883;
 constexpr std::uint16_t kServerPortMin  = 1;
 constexpr std::uint16_t kServerPortMax  = 65535;
-constexpr const char*   kUsername       = "";
+constexpr const char*   kClientId       = "ESPID-Coffee-Rancilio";
+constexpr const char*   kUsername       = "ESPID-Coffee-Rancilio@home-lab";
 constexpr const char*   kPassword       = "";
-constexpr const char*   kTopicPrefix    = "espid/";
+constexpr const char*   kTopicPrefix    = "";
+constexpr const char*   kTelemetryTopic = "telemetry";
 constexpr bool          kHassioDiscovery = false;
 constexpr const char*   kHassioPrefix   = "homeassistant";
+constexpr std::size_t   kHostMaxLen     = 64;
+constexpr std::size_t   kUsernameMaxLen = 64;
+constexpr std::size_t   kPasswordMaxLen = 64;
+constexpr std::size_t   kClientIdMaxLen = 64;
+constexpr std::size_t   kUriMaxLen      = 96;
+constexpr std::size_t   kTopicMaxLen    = 96;
+constexpr std::size_t   kPayloadMaxLen  = 256;
+constexpr std::uint32_t kTemperaturePublishPeriodMs = 30'000;
+constexpr std::uint32_t kPressurePublishPeriodMs = 500;
+constexpr std::uint32_t kRuntimeSettingsCheckPeriodMs = 1000;
+constexpr std::uint32_t kSchedulerPeriodMs = 100;
+constexpr std::uint32_t kReconnectDelayMs = 5000;
+constexpr std::uint32_t kNetworkTimeoutMs = 10000;
+constexpr std::uint32_t kTaskStackBytes = 6144;
+constexpr std::uint32_t kTaskPriority   = 2;
+constexpr std::int32_t  kTaskCore       = 1;
 }  // namespace mqtt
 
 }  // namespace espid::config

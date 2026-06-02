@@ -22,11 +22,14 @@
 #include "esp_http_server.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_crt_bundle.h"
+#include "mqtt_client.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "hal_cpp/result.hpp"
@@ -42,6 +45,9 @@ namespace {
 namespace cfg = espid::config;
 
 constexpr const char* kTag = cfg::kLogTag;
+
+extern const std::uint8_t mqtt_client_crt_start[] asm("_binary_mqtt_client_crt_start");
+extern const std::uint8_t mqtt_client_key_start[] asm("_binary_mqtt_client_key_start");
 
 const char* wifi_label(espid::hal_cpp::WifiState s) noexcept {
     switch (s) {
@@ -197,6 +203,12 @@ constexpr const char* kCfgPreinfusion = "preinf_t";
 constexpr const char* kCfgPreinfusionPause = "preinf_pause_t";
 constexpr const char* kCfgMqttHost = "mqtt_host";
 constexpr const char* kCfgMqttPort = "mqtt_port";
+constexpr const char* kCfgMqttUsername = "mqtt_user";
+constexpr const char* kCfgMqttPassword = "mqtt_pass";
+constexpr const char* kCfgMqttClientId = "mqtt_client";
+
+bool load_setting_from_nvs(const char* key, const char* fallback,
+                           char* out, std::size_t out_len) noexcept;
 
 float default_pid_tn_seconds() noexcept {
     return (cfg::pid::kKi > 0.0F) ? (cfg::pid::kKp / cfg::pid::kKi) : 0.0F;
@@ -218,7 +230,14 @@ RuntimeControlSettings g_runtime_control;
 std::atomic<float> g_control_duty_pct{0.0F};
 std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
+std::atomic<bool> g_mqtt_connected{false};
 std::atomic<bool> g_emergency_stop{false};
+SemaphoreHandle_t g_i2c_bus_mutex = nullptr;
+
+TickType_t ticks_from_ms(std::uint32_t ms) noexcept {
+    const TickType_t t = pdMS_TO_TICKS(ms);
+    return (t > 0) ? t : 1;
+}
 
 int hex_value(char c) noexcept {
     if (c >= '0' && c <= '9') {
@@ -351,6 +370,122 @@ bool valid_mqtt_host(const char* host) noexcept {
         }
     }
     return true;
+}
+
+bool mqtt_endpoint_configured(const char* host) noexcept {
+    if (host == nullptr || host[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(host, "0.0.0.0") != 0;
+}
+
+struct MqttRuntimeSettings {
+    char host[cfg::mqtt::kHostMaxLen]{};
+    std::uint16_t port{cfg::mqtt::kServerPort};
+    char username[cfg::mqtt::kUsernameMaxLen]{};
+    char password[cfg::mqtt::kPasswordMaxLen]{};
+    char client_id[cfg::mqtt::kClientIdMaxLen]{};
+};
+
+bool same_mqtt_runtime_settings(const MqttRuntimeSettings& a,
+                                const MqttRuntimeSettings& b) noexcept {
+    return a.port == b.port &&
+           std::strcmp(a.host, b.host) == 0 &&
+           std::strcmp(a.username, b.username) == 0 &&
+           std::strcmp(a.password, b.password) == 0 &&
+           std::strcmp(a.client_id, b.client_id) == 0;
+}
+
+bool load_mqtt_runtime_from_nvs(MqttRuntimeSettings* out) noexcept {
+    if (out == nullptr) {
+        return false;
+    }
+
+    char port_default[8];
+    char port_txt[8];
+    std::snprintf(port_default, sizeof(port_default), "%u",
+                  static_cast<unsigned>(cfg::mqtt::kServerPort));
+
+    (void)load_setting_from_nvs(kCfgMqttHost, cfg::mqtt::kServerIp,
+                                out->host, sizeof(out->host));
+    (void)load_setting_from_nvs(kCfgMqttPort, port_default,
+                                port_txt, sizeof(port_txt));
+    (void)load_setting_from_nvs(kCfgMqttUsername, cfg::mqtt::kUsername,
+                                out->username, sizeof(out->username));
+    (void)load_setting_from_nvs(kCfgMqttPassword, cfg::mqtt::kPassword,
+                                out->password, sizeof(out->password));
+    (void)load_setting_from_nvs(kCfgMqttClientId, cfg::mqtt::kClientId,
+                                out->client_id, sizeof(out->client_id));
+
+    std::uint16_t parsed_port = cfg::mqtt::kServerPort;
+    if (!parse_u16_in_range(port_txt,
+                            cfg::mqtt::kServerPortMin,
+                            cfg::mqtt::kServerPortMax,
+                            &parsed_port)) {
+        parsed_port = cfg::mqtt::kServerPort;
+    }
+
+    if (!valid_mqtt_host(out->host) || !mqtt_endpoint_configured(out->host)) {
+        return false;
+    }
+
+    out->port = parsed_port;
+    return true;
+}
+
+void build_mqtt_topic(char* out,
+                      std::size_t out_len,
+                      const char* prefix,
+                      const char* suffix) noexcept {
+    if (out == nullptr || out_len == 0) {
+        return;
+    }
+
+    const char* pfx = (prefix != nullptr) ? prefix : "";
+    if (pfx[0] == '\0') {
+        std::snprintf(out, out_len, "%s", suffix);
+        return;
+    }
+    const std::size_t pfx_len = std::strlen(pfx);
+
+    if (pfx_len > 0 && pfx[pfx_len - 1] == '/') {
+        std::snprintf(out, out_len, "%s%s", pfx, suffix);
+    } else {
+        std::snprintf(out, out_len, "%s/%s", pfx, suffix);
+    }
+}
+
+void mqtt_event_handler(void* /*handler_args*/,
+                        esp_event_base_t /*base*/,
+                        int32_t event_id,
+                        void* event_data) {
+    const auto* event = static_cast<esp_mqtt_event_handle_t>(event_data);
+    switch (static_cast<esp_mqtt_event_id_t>(event_id)) {
+        case MQTT_EVENT_CONNECTED:
+            g_mqtt_connected.store(true, std::memory_order_relaxed);
+            ESP_LOGI(kTag, "mqtt: connected");
+            break;
+
+        case MQTT_EVENT_DISCONNECTED:
+            g_mqtt_connected.store(false, std::memory_order_relaxed);
+            ESP_LOGW(kTag, "mqtt: disconnected");
+            break;
+
+        case MQTT_EVENT_ERROR:
+            g_mqtt_connected.store(false, std::memory_order_relaxed);
+            if (event != nullptr && event->error_handle != nullptr) {
+                ESP_LOGW(kTag, "mqtt: error type=%d tls=0x%x sock_errno=%d",
+                         static_cast<int>(event->error_handle->error_type),
+                         static_cast<unsigned>(event->error_handle->esp_tls_last_esp_err),
+                         event->error_handle->esp_transport_sock_errno);
+            } else {
+                ESP_LOGW(kTag, "mqtt: error");
+            }
+            break;
+
+        default:
+            break;
+    }
 }
 
 void publish_runtime_control_settings(float pid_kp,
@@ -549,6 +684,9 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     char preinf_pause_t[16];
     char mqtt_host[64];
     char mqtt_port[8];
+    char mqtt_user[cfg::mqtt::kUsernameMaxLen];
+    char mqtt_pass[cfg::mqtt::kPasswordMaxLen];
+    char mqtt_client[cfg::mqtt::kClientIdMaxLen];
 
     const float pid_tn_default =
         (cfg::pid::kKi > 0.0F) ? (cfg::pid::kKp / cfg::pid::kKi) : 0.0F;
@@ -597,20 +735,27 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
                                 mqtt_host, sizeof(mqtt_host));
     (void)load_setting_from_nvs(kCfgMqttPort, mqtt_port_default,
                                 mqtt_port, sizeof(mqtt_port));
+    (void)load_setting_from_nvs(kCfgMqttUsername, cfg::mqtt::kUsername,
+                                mqtt_user, sizeof(mqtt_user));
+    (void)load_setting_from_nvs(kCfgMqttPassword, cfg::mqtt::kPassword,
+                                mqtt_pass, sizeof(mqtt_pass));
+    (void)load_setting_from_nvs(kCfgMqttClientId, cfg::mqtt::kClientId,
+                                mqtt_client, sizeof(mqtt_client));
 
-    char json[512];
+    char json[768];
     const int n = std::snprintf(json, sizeof(json),
         "{\"ap_ssid\":\"%s\",\"wifi_ssid\":\"%s\","
         "\"pid_kp\":\"%s\",\"pid_tn\":\"%s\",\"pid_tv\":\"%s\","
         "\"brew_sp\":\"%s\",\"steam_sp\":\"%s\","
         "\"brew_t\":\"%s\",\"preinf_t\":\"%s\",\"preinf_pause_t\":\"%s\","
-        "\"mqtt_host\":\"%s\",\"mqtt_port\":\"%s\"}",
+        "\"mqtt_host\":\"%s\",\"mqtt_port\":\"%s\","
+        "\"mqtt_user\":\"%s\",\"mqtt_pass\":\"%s\",\"mqtt_client\":\"%s\"}",
         configured_ap_ssid(),
         g_saved_sta_ssid,
         pid_kp, pid_tn, pid_tv,
         brew_sp, steam_sp,
         brew_t, preinf_t, preinf_pause_t,
-        mqtt_host, mqtt_port);
+        mqtt_host, mqtt_port, mqtt_user, mqtt_pass, mqtt_client);
 
     if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(json)) {
         return httpd_resp_send_500(req);
@@ -739,6 +884,9 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     char preinf_pause_txt[16]{};
     char mqtt_host_txt[64]{};
     char mqtt_port_txt[8]{};
+    char mqtt_user_txt[cfg::mqtt::kUsernameMaxLen]{};
+    char mqtt_pass_txt[cfg::mqtt::kPasswordMaxLen]{};
+    char mqtt_client_txt[cfg::mqtt::kClientIdMaxLen]{};
 
     if (!form_field(body, "pid_kp", pid_kp_txt, sizeof(pid_kp_txt))) {
         return reject_bad_request("Missing pid_kp");
@@ -769,6 +917,19 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     }
     if (!form_field(body, "mqtt_port", mqtt_port_txt, sizeof(mqtt_port_txt))) {
         return reject_bad_request("Missing mqtt_port");
+    }
+
+    if (!form_field(body, "mqtt_user", mqtt_user_txt, sizeof(mqtt_user_txt))) {
+        (void)load_setting_from_nvs(kCfgMqttUsername, cfg::mqtt::kUsername,
+                                    mqtt_user_txt, sizeof(mqtt_user_txt));
+    }
+    if (!form_field(body, "mqtt_pass", mqtt_pass_txt, sizeof(mqtt_pass_txt))) {
+        (void)load_setting_from_nvs(kCfgMqttPassword, cfg::mqtt::kPassword,
+                                    mqtt_pass_txt, sizeof(mqtt_pass_txt));
+    }
+    if (!form_field(body, "mqtt_client", mqtt_client_txt, sizeof(mqtt_client_txt))) {
+        (void)load_setting_from_nvs(kCfgMqttClientId, cfg::mqtt::kClientId,
+                                    mqtt_client_txt, sizeof(mqtt_client_txt));
     }
 
     float pid_kp = 0.0F;
@@ -856,6 +1017,9 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
         {kCfgPreinfusionPause, preinf_pause_txt},
         {kCfgMqttHost, mqtt_host_txt},
         {kCfgMqttPort, mqtt_port_txt},
+        {kCfgMqttUsername, mqtt_user_txt},
+        {kCfgMqttPassword, mqtt_pass_txt},
+        {kCfgMqttClientId, mqtt_client_txt},
     };
 
     for (const auto& e : entries) {
@@ -1025,9 +1189,52 @@ void pressure_task(void* arg) {
     ESP_LOGI(kTag, "pressure_task: running on core %d", xPortGetCoreID());
 
     std::uint32_t log_div = 0;
+    std::uint32_t lock_div = 0;
     for (;;) {
-        const auto sample = ctx->driver->read_sample();
-        if (!sample.ok()) {
+        bool bus_locked = false;
+        if (g_i2c_bus_mutex != nullptr) {
+            bus_locked = (xSemaphoreTake(
+                g_i2c_bus_mutex,
+                ticks_from_ms(cfg::pressure::kI2cTimeoutMs)) == pdTRUE);
+            if (!bus_locked) {
+                if ((++lock_div % 10U) == 0U) {
+                    ESP_LOGW(kTag, "pressure bus lock timeout");
+                }
+                vTaskDelay(pdMS_TO_TICKS(cfg::pressure::kReadPeriodMs));
+                continue;
+            }
+        }
+
+        espid::abp2::DecodedSample sample_value{};
+        bool sample_ok = false;
+        espid::hal_cpp::Error sample_error = espid::hal_cpp::Error::kOk;
+
+        for (std::uint32_t attempt = 0;
+             attempt <= cfg::pressure::kReadRetryCount;
+             ++attempt) {
+            const auto sample = ctx->driver->read_sample();
+            if (sample.ok()) {
+                sample_value = sample.value();
+                sample_ok = true;
+                break;
+            }
+
+            sample_error = sample.error();
+            if (sample_error != espid::hal_cpp::Error::kBusError &&
+                sample_error != espid::hal_cpp::Error::kTimeout) {
+                break;
+            }
+
+            if (attempt < cfg::pressure::kReadRetryCount) {
+                vTaskDelay(pdMS_TO_TICKS(cfg::pressure::kReadRetryDelayMs));
+            }
+        }
+
+        if (bus_locked) {
+            xSemaphoreGive(g_i2c_bus_mutex);
+        }
+
+        if (!sample_ok) {
             const std::uint32_t errors =
                 g_pressure_consecutive_errors.fetch_add(1, std::memory_order_relaxed) + 1U;
             if (errors >= cfg::pressure::kMaxConsecutiveErrors) {
@@ -1035,11 +1242,11 @@ void pressure_task(void* arg) {
             }
             if (errors == 1U || (errors % 10U) == 0U) {
                 ESP_LOGW(kTag, "pressure read error: %s (n=%" PRIu32 ")",
-                         espid::hal_cpp::to_string(sample.error()), errors);
+                         espid::hal_cpp::to_string(sample_error), errors);
             }
 
-            if ((sample.error() == espid::hal_cpp::Error::kRangeError ||
-                 sample.error() == espid::hal_cpp::Error::kHardwareFault) &&
+            if ((sample_error == espid::hal_cpp::Error::kRangeError ||
+                 sample_error == espid::hal_cpp::Error::kHardwareFault) &&
                 (errors <= 5U || (errors % 50U) == 0U)) {
                 std::uint8_t raw[7]{};
                 if (ctx->driver->last_raw_frame(raw)) {
@@ -1081,7 +1288,7 @@ void pressure_task(void* arg) {
                 }
             }
         } else {
-            const auto& s = sample.value();
+            const auto& s = sample_value;
             const bool stale_sample = (s.status == espid::abp2::FrameStatus::kStaleData);
             g_pressure_consecutive_errors.store(0U, std::memory_order_relaxed);
             g_pressure.pressure_bar.store(s.pressure_bar, std::memory_order_relaxed);
@@ -1103,6 +1310,182 @@ void pressure_task(void* arg) {
         }
 
         vTaskDelay(pdMS_TO_TICKS(cfg::pressure::kReadPeriodMs));
+    }
+}
+
+void mqtt_task(void* /*arg*/) {
+    ESP_LOGI(kTag, "mqtt_task: running on core %d", xPortGetCoreID());
+
+    char uri[cfg::mqtt::kUriMaxLen]{};
+    char topic[cfg::mqtt::kTopicMaxLen]{};
+    char payload[cfg::mqtt::kPayloadMaxLen]{};
+    std::uint32_t publish_errors = 0;
+
+    for (;;) {
+        MqttRuntimeSettings runtime_cfg{};
+        if (!load_mqtt_runtime_from_nvs(&runtime_cfg)) {
+            ESP_LOGW(kTag, "mqtt: endpoint not configured; set mqtt_host/mqtt_port");
+            vTaskDelay(pdMS_TO_TICKS(cfg::mqtt::kReconnectDelayMs));
+            continue;
+        }
+
+        std::snprintf(uri, sizeof(uri), "mqtt://%s:%u",
+                      runtime_cfg.host, static_cast<unsigned>(runtime_cfg.port));
+        if (cfg::mqtt::kUseTls) {
+            std::snprintf(uri, sizeof(uri), "mqtts://%s:%u",
+                          runtime_cfg.host, static_cast<unsigned>(runtime_cfg.port));
+        }
+        build_mqtt_topic(topic, sizeof(topic),
+                         cfg::mqtt::kTopicPrefix,
+                         cfg::mqtt::kTelemetryTopic);
+
+        esp_mqtt_client_config_t mqtt_cfg{};
+        mqtt_cfg.broker.address.uri = uri;
+        mqtt_cfg.credentials.client_id =
+            (runtime_cfg.client_id[0] != '\0') ? runtime_cfg.client_id : nullptr;
+        mqtt_cfg.credentials.username =
+            (runtime_cfg.username[0] != '\0') ? runtime_cfg.username : nullptr;
+        mqtt_cfg.credentials.authentication.password =
+            (runtime_cfg.password[0] != '\0') ? runtime_cfg.password : nullptr;
+        if (cfg::mqtt::kUseTls) {
+            mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+            mqtt_cfg.credentials.authentication.certificate =
+                reinterpret_cast<const char*>(mqtt_client_crt_start);
+            mqtt_cfg.credentials.authentication.key =
+                reinterpret_cast<const char*>(mqtt_client_key_start);
+        }
+        mqtt_cfg.network.reconnect_timeout_ms =
+            static_cast<int>(cfg::mqtt::kReconnectDelayMs);
+        mqtt_cfg.network.timeout_ms =
+            static_cast<int>(cfg::mqtt::kNetworkTimeoutMs);
+
+        esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+        if (client == nullptr) {
+            ESP_LOGE(kTag, "mqtt: init failed");
+            vTaskDelay(pdMS_TO_TICKS(cfg::mqtt::kReconnectDelayMs));
+            continue;
+        }
+
+        g_mqtt_connected.store(false, std::memory_order_relaxed);
+        (void)esp_mqtt_client_register_event(
+            client, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
+
+        const esp_err_t start_err = esp_mqtt_client_start(client);
+        if (start_err != ESP_OK) {
+            ESP_LOGE(kTag, "mqtt: start failed: %s", esp_err_to_name(start_err));
+            (void)esp_mqtt_client_destroy(client);
+            vTaskDelay(pdMS_TO_TICKS(cfg::mqtt::kReconnectDelayMs));
+            continue;
+        }
+
+        std::uint64_t next_temp_publish_ms = 0;
+        std::uint64_t next_pressure_publish_ms = 0;
+        std::uint64_t next_runtime_check_ms = 0;
+        bool prev_shot_running = false;
+
+        const auto publish_payload = [&](const char* msg) {
+            const int msg_id = esp_mqtt_client_publish(
+                client, topic, msg, 0, 0, 0);
+            if (msg_id >= 0) {
+                return;
+            }
+
+            ++publish_errors;
+            if ((publish_errors % 10U) == 0U) {
+                ESP_LOGW(kTag, "mqtt: publish failures=%" PRIu32,
+                         publish_errors);
+            }
+        };
+
+        while (true) {
+            const std::uint64_t now_ms =
+                static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+            const bool mqtt_connected =
+                g_mqtt_connected.load(std::memory_order_relaxed);
+            const bool shot_running =
+                g_shot.running.load(std::memory_order_relaxed);
+
+            if (!prev_shot_running && shot_running) {
+                next_pressure_publish_ms = now_ms;
+            }
+            prev_shot_running = shot_running;
+
+            if (mqtt_connected) {
+                if (now_ms >= next_temp_publish_ms) {
+                    const bool temp_valid =
+                        g_snapshot.valid.load(std::memory_order_acquire);
+                    const float temp_c =
+                        g_snapshot.temp_c.load(std::memory_order_relaxed);
+
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"temperature\",\"uptime_ms\":%" PRIu64
+                        ",\"temp_c\":%.2f,\"temp_valid\":%u}",
+                        now_ms,
+                        static_cast<double>(temp_c),
+                        temp_valid ? 1U : 0U);
+
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
+                        publish_payload(payload);
+                    }
+
+                    next_temp_publish_ms =
+                        now_ms + static_cast<std::uint64_t>(cfg::mqtt::kTemperaturePublishPeriodMs);
+                }
+
+                if (shot_running && now_ms >= next_pressure_publish_ms) {
+                    const bool pressure_valid =
+                        g_pressure.valid.load(std::memory_order_acquire);
+                    const bool pressure_stale =
+                        g_pressure.stale.load(std::memory_order_relaxed);
+                    const float pressure_bar =
+                        g_pressure.pressure_bar.load(std::memory_order_relaxed);
+                    const std::uint32_t shot_ms =
+                        g_shot.elapsed_ms.load(std::memory_order_relaxed);
+
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"pressure\",\"uptime_ms\":%" PRIu64
+                        ",\"shot_s\":%.1f,\"pressure_bar\":%.3f"
+                        ",\"pressure_valid\":%u,\"pressure_stale\":%u}",
+                        now_ms,
+                        static_cast<double>(shot_ms) / 1000.0,
+                        static_cast<double>(pressure_bar),
+                        pressure_valid ? 1U : 0U,
+                        pressure_stale ? 1U : 0U);
+
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
+                        publish_payload(payload);
+                    }
+
+                    next_pressure_publish_ms =
+                        now_ms + static_cast<std::uint64_t>(cfg::mqtt::kPressurePublishPeriodMs);
+                }
+            } else {
+                next_temp_publish_ms = now_ms;
+                next_pressure_publish_ms = now_ms;
+            }
+
+            if (now_ms >= next_runtime_check_ms) {
+                MqttRuntimeSettings new_cfg{};
+                if (load_mqtt_runtime_from_nvs(&new_cfg)) {
+                    if (!same_mqtt_runtime_settings(new_cfg, runtime_cfg)) {
+                        ESP_LOGI(kTag, "mqtt: settings changed, reconnecting");
+                        break;
+                    }
+                }
+
+                next_runtime_check_ms =
+                    now_ms + static_cast<std::uint64_t>(cfg::mqtt::kRuntimeSettingsCheckPeriodMs);
+            }
+
+            vTaskDelay(ticks_from_ms(cfg::mqtt::kSchedulerPeriodMs));
+        }
+
+        (void)esp_mqtt_client_stop(client);
+        (void)esp_mqtt_client_destroy(client);
+        g_mqtt_connected.store(false, std::memory_order_relaxed);
+        vTaskDelay(pdMS_TO_TICKS(cfg::mqtt::kReconnectDelayMs));
     }
 }
 
@@ -1231,14 +1614,29 @@ void display_task(void* arg) {
 
     char big[16];
     char small[24];
+    char footer[48];
+
+    bool          was_shot_active = false;
+    std::uint64_t post_shot_until_ms = 0;
+    std::uint32_t lock_div = 0;
 
     for (;;) {
+        const std::uint64_t now_ms =
+            static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
         const bool  valid = g_snapshot.valid.load(std::memory_order_acquire);
         const float t     = g_snapshot.temp_c.load(std::memory_order_relaxed);
         const std::uint32_t shot_ms =
             g_shot.elapsed_ms.load(std::memory_order_relaxed);
         const bool shot_active =
             g_shot.running.load(std::memory_order_relaxed);
+        const bool pressure_valid =
+            g_pressure.valid.load(std::memory_order_acquire);
+        const float pressure_bar =
+            g_pressure.pressure_bar.load(std::memory_order_relaxed);
+        const bool pressure_stale =
+            g_pressure.stale.load(std::memory_order_relaxed);
+        const float brew_setpoint_c =
+            g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
         espid::hal_cpp::WifiState wifi_state =
             espid::hal_cpp::WifiState::kIdle;
         espid::hal_cpp::INetwork::IpString wifi_ip{};
@@ -1248,6 +1646,16 @@ void display_task(void* arg) {
             wifi_ip = g_network->ip_string();
         }
 
+        if (shot_active) {
+            post_shot_until_ms = now_ms + static_cast<std::uint64_t>(cfg::brew::kPostShotHoldMs);
+        } else if (was_shot_active && shot_ms > 0U) {
+            post_shot_until_ms = now_ms + static_cast<std::uint64_t>(cfg::brew::kPostShotHoldMs);
+        }
+        was_shot_active = shot_active;
+
+        const bool show_shot_screen =
+            shot_active || (shot_ms > 0U && now_ms < post_shot_until_ms);
+
         char temp_str[16];
         if (valid && std::isfinite(t)) {
             std::snprintf(temp_str, sizeof(temp_str), "%5.2f",
@@ -1256,35 +1664,52 @@ void display_task(void* arg) {
             std::snprintf(temp_str, sizeof(temp_str), "--.--");
         }
 
+        char setpoint_str[16];
+        if (std::isfinite(brew_setpoint_c)) {
+            std::snprintf(setpoint_str, sizeof(setpoint_str), "SP:%4.1f",
+                          static_cast<double>(brew_setpoint_c));
+        } else {
+            std::snprintf(setpoint_str, sizeof(setpoint_str), "SP:--.-");
+        }
+
         display->clear();
         if (wifi_state == espid::hal_cpp::WifiState::kApFallback) {
             char ap_hdr[20];
             std::snprintf(ap_hdr, sizeof(ap_hdr), "AP:%s", configured_ap_ssid());
-            display->draw_text(0, 12, espid::hal_cpp::Font::kSmall, ap_hdr);
-            display->draw_text(86, 12, espid::hal_cpp::Font::kSmall,
+            display->draw_text(0, 10, espid::hal_cpp::Font::kSmall, ap_hdr);
+            display->draw_text(86, 10, espid::hal_cpp::Font::kSmall,
                                wifi_ip.data());
         } else {
-            display->draw_text(0, 12, espid::hal_cpp::Font::kSmall,
+            display->draw_text(0, 10, espid::hal_cpp::Font::kSmall,
                                "ESPID-Coffee");
-            display->draw_text(96, 12, espid::hal_cpp::Font::kSmall,
+            display->draw_text(96, 10, espid::hal_cpp::Font::kSmall,
                                wifi_label(wifi_state));
         }
 
-        if (shot_active) {
-            // Shot in progress (or just finished): timer takes the big slot,
-            // temperature drops to the small footer.
+        if (show_shot_screen) {
+            char pressure_str[16];
+            if (pressure_valid && std::isfinite(pressure_bar)) {
+                std::snprintf(pressure_str, sizeof(pressure_str), "%4.1f%sbar",
+                              static_cast<double>(pressure_bar),
+                              pressure_stale ? "*" : "");
+            } else {
+                std::snprintf(pressure_str, sizeof(pressure_str), "--.-bar");
+            }
+
             std::snprintf(big, sizeof(big), "%4.1fs",
                           static_cast<double>(shot_ms) / 1000.0);
-            std::snprintf(small, sizeof(small), "T=%s C", temp_str);
-            display->draw_text(8,  40, espid::hal_cpp::Font::kLarge, big);
-            display->draw_text(0,  60, espid::hal_cpp::Font::kSmall, small);
+            std::snprintf(footer, sizeof(footer), "P:%s T:%sC",
+                          pressure_str, temp_str);
+            display->draw_text(8,  44, espid::hal_cpp::Font::kLarge, big);
+            display->draw_text(0,  60, espid::hal_cpp::Font::kSmall, footer);
         } else {
-            // Idle: temperature is the headline; timer line shows 0.0 s.
-            std::snprintf(small, sizeof(small), "shot %4.1f s",
+            // Idle: big temperature, footer with shot + setpoint.
+            std::snprintf(small, sizeof(small), "shot %4.1fs",
                           static_cast<double>(shot_ms) / 1000.0);
-            display->draw_text(8,  40, espid::hal_cpp::Font::kLarge, temp_str);
-            display->draw_text(110, 22, espid::hal_cpp::Font::kSmall, "C");
-            display->draw_text(0,  60, espid::hal_cpp::Font::kSmall, small);
+            std::snprintf(footer, sizeof(footer), "%s %sC", small, setpoint_str);
+            display->draw_text(8,  44, espid::hal_cpp::Font::kLarge, temp_str);
+            display->draw_text(110, 28, espid::hal_cpp::Font::kSmall, "C");
+            display->draw_text(0,  60, espid::hal_cpp::Font::kSmall, footer);
         }
         if (wifi_state == espid::hal_cpp::WifiState::kApFallback) {
             char ap_pw[24];
@@ -1297,7 +1722,19 @@ void display_task(void* arg) {
             display->draw_text(0, 60, espid::hal_cpp::Font::kSmall, ap_pw);
         }
 
-        (void)display->flush();
+        if (g_i2c_bus_mutex == nullptr) {
+            (void)display->flush();
+        } else {
+            const bool got_lock = (xSemaphoreTake(
+                g_i2c_bus_mutex,
+                ticks_from_ms(cfg::oled::kI2cLockTimeoutMs)) == pdTRUE);
+            if (got_lock) {
+                (void)display->flush();
+                xSemaphoreGive(g_i2c_bus_mutex);
+            } else if ((++lock_div % 10U) == 0U) {
+                ESP_LOGW(kTag, "display bus lock timeout");
+            }
+        }
 
         vTaskDelay(pdMS_TO_TICKS(cfg::oled::kRefreshPeriodMs));
     }
@@ -1535,6 +1972,18 @@ extern "C" void app_main(void) {
         }
     }
 
+    if (ds.ok() && pressure_ready &&
+        cfg::oled::kI2cBusNum == cfg::pressure::kI2cBusNum &&
+        cfg::oled::kSdaGpio == cfg::pressure::kSdaGpio &&
+        cfg::oled::kSclGpio == cfg::pressure::kSclGpio) {
+        g_i2c_bus_mutex = xSemaphoreCreateMutex();
+        if (g_i2c_bus_mutex == nullptr) {
+            ESP_LOGW(kTag, "I2C bus mutex create failed; display/pressure remain unsynchronised");
+        } else {
+            ESP_LOGI(kTag, "I2C bus mutex enabled for shared OLED/ABP2 bus");
+        }
+    }
+
     if (ds.ok()) {
         ok = xTaskCreatePinnedToCore(
             &display_task, "display", cfg::oled::kTaskStackBytes, &display,
@@ -1564,6 +2013,19 @@ extern "C" void app_main(void) {
                 cfg::brew::kTaskPriority, nullptr, cfg::brew::kTaskCore);
             if (ok != pdPASS) {
                 ESP_LOGW(kTag, "button_task create failed - no brew control");
+            }
+        }
+    }
+
+    if (cfg::mqtt::kEnabled) {
+        if (!cfg::net::kWifiEnabled) {
+            ESP_LOGW(kTag, "mqtt: disabled at runtime because wifi is disabled");
+        } else {
+            ok = xTaskCreatePinnedToCore(
+                &mqtt_task, "mqtt", cfg::mqtt::kTaskStackBytes, nullptr,
+                cfg::mqtt::kTaskPriority, nullptr, cfg::mqtt::kTaskCore);
+            if (ok != pdPASS) {
+                ESP_LOGW(kTag, "mqtt_task create failed - telemetry disabled");
             }
         }
     }
