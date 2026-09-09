@@ -223,7 +223,7 @@ constexpr float         kPressureMaxPsi = 145.038F;
 // Both HX711 share the clock line; each exposes its own data line. Total
 // weight is the sum of the two calibrated cell readings.
 namespace scale {
-constexpr bool          kEnabled        = true;
+constexpr bool          kEnabled        = false;  // bench-test before enabling
 constexpr std::uint8_t  kHx711Count     = 2;
 constexpr gpio_num_t    kData1Gpio      = GPIO_NUM_7;
 constexpr gpio_num_t    kData2Gpio      = GPIO_NUM_10;

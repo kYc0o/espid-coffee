@@ -24,6 +24,7 @@ idf_component_register(
         abp2
         pump
         valve
+        scale
 )
 
 # Modern C++ for application code.

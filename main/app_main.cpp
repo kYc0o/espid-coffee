@@ -36,6 +36,8 @@
 #include "heater/slow_pwm_ssr_heater.hpp"
 #include "pid/controller.hpp"
 #include "pump/psm_pump.hpp"
+#include "scale/hx711_scale.hpp"
+#include "scale/scale_core.hpp"
 #include "ssd1306/ssd1306_display.hpp"
 #include "tsic306/tsic306_decoder.hpp"
 #include "tsic306/tsic306_driver.hpp"
@@ -230,6 +232,7 @@ struct RuntimeControlSettings {
 
 RuntimeControlSettings g_runtime_control;
 std::atomic<float> g_control_duty_pct{0.0F};
+std::atomic<float> g_weight_g{0.0F};
 std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
 std::atomic<bool> g_mqtt_connected{false};
@@ -1825,6 +1828,44 @@ void steam_task(void* /*arg*/) {
     }
 }
 
+// Polled dual-HX711 scale task.  Reads both cells, feeds ScaleCore, and
+// publishes the summed weight.  Tares once on the first successful read.
+void scale_task(void* arg) {
+    auto* dev = static_cast<espid::scale::Hx711Scale*>(arg);
+    ESP_LOGI(kTag, "scale_task: running on core %d", xPortGetCoreID());
+
+    espid::scale::ScaleCore        core;
+    espid::scale::ScaleCore::Config ccfg{};
+    ccfg.calibration_factor1 = cfg::scale::kCalibrationFactor1;
+    ccfg.calibration_factor2 = cfg::scale::kCalibrationFactor2;
+    (void)core.set_config(ccfg);
+
+    bool          tared   = false;
+    std::uint32_t log_div = 0;
+    for (;;) {
+        if (dev->ready()) {
+            std::int32_t r1 = 0;
+            std::int32_t r2 = 0;
+            if (dev->read(r1, r2).ok()) {
+                core.update(r1, r2);
+                if (!tared) {
+                    core.tare();
+                    tared = true;
+                    ESP_LOGI(kTag, "scale: tared");
+                }
+                const float g = core.weight_g();
+                g_weight_g.store(g, std::memory_order_relaxed);
+                if ((++log_div % 20U) == 0U) {
+                    ESP_LOGI(kTag, "scale: %.1f g (r1=%ld r2=%ld)",
+                             static_cast<double>(g),
+                             static_cast<long>(r1), static_cast<long>(r2));
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(cfg::scale::kReadPeriodMs));
+    }
+}
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -1844,6 +1885,7 @@ extern "C" void app_main(void) {
     static espid::abp2::Abp2Driver         pressure;
     static espid::pump::PsmPump            pump;
     static espid::valve::SolenoidValve     valve;
+    static espid::scale::Hx711Scale        scale_hw;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
@@ -1943,6 +1985,25 @@ extern "C" void app_main(void) {
         } else {
             valve_ready = true;
             ESP_LOGI(kTag, "valve ready on gpio=%d", vcfg.gpio);
+        }
+    }
+
+    // Dual-HX711 scale (disabled by default; bench-test before enabling).
+    bool scale_ready = false;
+    if (cfg::scale::kEnabled) {
+        espid::scale::Hx711Scale::Config sc{};
+        sc.data1_gpio = static_cast<int>(cfg::scale::kData1Gpio);
+        sc.data2_gpio = static_cast<int>(cfg::scale::kData2Gpio);
+        sc.clock_gpio = static_cast<int>(cfg::scale::kClockGpio);
+
+        const auto ss = scale_hw.init(sc);
+        if (!ss.ok()) {
+            ESP_LOGW(kTag, "scale init failed: %s - scale disabled",
+                     espid::hal_cpp::to_string(ss.error()));
+        } else {
+            scale_ready = true;
+            ESP_LOGI(kTag, "scale ready (d1=%d d2=%d clk=%d)",
+                     sc.data1_gpio, sc.data2_gpio, sc.clock_gpio);
         }
     }
 
@@ -2122,6 +2183,15 @@ extern "C" void app_main(void) {
             if (ok != pdPASS) {
                 ESP_LOGW(kTag, "steam_task create failed - no steam switch");
             }
+        }
+    }
+
+    if (cfg::scale::kEnabled && scale_ready) {
+        ok = xTaskCreatePinnedToCore(
+            &scale_task, "scale", cfg::scale::kTaskStackBytes, &scale_hw,
+            cfg::scale::kTaskPriority, nullptr, cfg::scale::kTaskCore);
+        if (ok != pdPASS) {
+            ESP_LOGW(kTag, "scale_task create failed - no scale");
         }
     }
 
