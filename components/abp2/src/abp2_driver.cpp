@@ -15,6 +15,10 @@ namespace {
 constexpr const char* kTag = "abp2_drv";
 constexpr std::uint8_t kReadMeasurementCmd[3] = {0xAAU, 0x00U, 0x00U};
 
+// Budget for logging raw esp_err names on the first few I2C failures so a
+// NACK (device absent/mis-addressed) is distinguishable from a bus fault.
+std::uint32_t g_raw_err_log_budget = 8;
+
 hal_cpp::Error map_i2c_error(esp_err_t err) noexcept {
     if (err == ESP_ERR_TIMEOUT) {
         return hal_cpp::Error::kTimeout;
@@ -90,6 +94,26 @@ hal_cpp::Status Abp2Driver::init(const Config& cfg) noexcept {
              static_cast<int>(cfg_.sda),
              static_cast<int>(cfg_.scl),
              static_cast<unsigned>(cfg_.i2c_freq_hz));
+
+    // Presence check + bus scan: report every address that ACKs so a
+    // wrong-address or absent sensor is obvious in the boot log.
+    ESP_LOGI(kTag, "I2C scan on port %d (expecting ABP2 @ 0x%02X):",
+             cfg_.i2c_port, static_cast<unsigned>(cfg_.i2c_addr_7bit));
+    bool found_self = false;
+    for (std::uint16_t addr = 0x08U; addr <= 0x77U; ++addr) {
+        if (i2c_master_probe(bus_, addr, static_cast<int>(cfg_.timeout_ms)) == ESP_OK) {
+            ESP_LOGI(kTag, "  found device @ 0x%02X", static_cast<unsigned>(addr));
+            if (addr == cfg_.i2c_addr_7bit) {
+                found_self = true;
+            }
+        }
+    }
+    if (!found_self) {
+        ESP_LOGW(kTag,
+                 "ABP2 not detected at 0x%02X - check 3V3 power, SDA/SCL wiring "
+                 "and pull-ups; confirm it is the I2C variant",
+                 static_cast<unsigned>(cfg_.i2c_addr_7bit));
+    }
     return hal_cpp::Status{};
 }
 
@@ -106,6 +130,10 @@ hal_cpp::Result<DecodedSample> Abp2Driver::read_sample() noexcept {
         sizeof(kReadMeasurementCmd),
         static_cast<int>(cfg_.timeout_ms));
     if (err != ESP_OK) {
+        if (g_raw_err_log_budget > 0) {
+            --g_raw_err_log_budget;
+            ESP_LOGW(kTag, "measurement command failed: %s", esp_err_to_name(err));
+        }
         return map_i2c_error(err);
     }
 
@@ -117,6 +145,10 @@ hal_cpp::Result<DecodedSample> Abp2Driver::read_sample() noexcept {
         sizeof(raw),
         static_cast<int>(cfg_.timeout_ms));
     if (err != ESP_OK) {
+        if (g_raw_err_log_budget > 0) {
+            --g_raw_err_log_budget;
+            ESP_LOGW(kTag, "measurement read failed: %s", esp_err_to_name(err));
+        }
         return map_i2c_error(err);
     }
 
