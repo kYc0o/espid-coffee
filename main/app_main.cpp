@@ -35,6 +35,7 @@
 #include "hal_cpp/result.hpp"
 #include "heater/slow_pwm_ssr_heater.hpp"
 #include "pid/controller.hpp"
+#include "pump/psm_pump.hpp"
 #include "ssd1306/ssd1306_display.hpp"
 #include "tsic306/tsic306_decoder.hpp"
 #include "tsic306/tsic306_driver.hpp"
@@ -1797,6 +1798,7 @@ extern "C" void app_main(void) {
     static espid::wifi::EspWifiNetwork     wifi;
     static espid::heater::SlowPwmSsrHeater heater;
     static espid::abp2::Abp2Driver         pressure;
+    static espid::pump::PsmPump            pump;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
@@ -1859,6 +1861,26 @@ extern "C" void app_main(void) {
                      espid::hal_cpp::to_string(ps.error()));
         } else {
             pressure_ready = true;
+        }
+    }
+
+    // PSM pump dimmer: ISR-driven, no periodic task. Starts OFF (0 %).
+    if (cfg::pump::kEnabled) {
+        espid::pump::PsmPump::Config pump_cfg{};
+        pump_cfg.zero_cross_gpio   = static_cast<int>(cfg::pump::kZeroCrossGpio);
+        pump_cfg.gate_gpio         = static_cast<int>(cfg::pump::kPsmGpio);
+        pump_cfg.gate_active_high  = cfg::pump::kPsmActiveHigh;
+        pump_cfg.mains_frequency_hz = cfg::pump::kMainsFrequencyHz;
+        pump_cfg.gate_pulse_us     = cfg::pump::kGatePulseUs;
+
+        const auto pmps = pump.init(pump_cfg);
+        if (!pmps.ok()) {
+            ESP_LOGW(kTag, "pump PSM init failed: %s - pump disabled",
+                     espid::hal_cpp::to_string(pmps.error()));
+        } else {
+            (void)pump.set_power_pct(0.0F);
+            ESP_LOGI(kTag, "pump PSM ready (zc=%d gate=%d)",
+                     pump_cfg.zero_cross_gpio, pump_cfg.gate_gpio);
         }
     }
 

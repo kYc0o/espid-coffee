@@ -182,6 +182,7 @@ constexpr bool          kPsmActiveHigh       = true;
 constexpr gpio_num_t    kZeroCrossGpio       = GPIO_NUM_18;  // opto ZC input
 constexpr bool          kZeroCrossActiveHigh = true;
 constexpr std::uint32_t kMainsFrequencyHz    = 50;           // 100 Hz half-cycles
+constexpr std::uint32_t kGatePulseUs         = 50;           // RobotDyn-style gate pulse
 constexpr float         kDefaultPowerPct     = 100.0F;
 constexpr float         kPowerMinPct         = 0.0F;
 constexpr float         kPowerMaxPct         = 100.0F;

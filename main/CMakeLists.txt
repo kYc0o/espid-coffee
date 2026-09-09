@@ -22,6 +22,7 @@ idf_component_register(
         heater
         pid
         abp2
+        pump
 )
 
 # Modern C++ for application code.
