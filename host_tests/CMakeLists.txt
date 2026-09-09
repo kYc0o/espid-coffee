@@ -89,6 +89,7 @@ add_executable(espid_unit_tests
     test_heater.cpp
     test_psm.cpp
     test_scale.cpp
+    test_hx711_decode.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder

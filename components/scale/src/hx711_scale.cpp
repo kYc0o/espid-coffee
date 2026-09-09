@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
+#include "scale/hx711_decode.hpp"
 
 namespace espid::scale {
 
@@ -14,13 +15,6 @@ namespace {
 // Shared across instances (only one scale expected); guards the clock
 // burst from preemption that would power the HX711 down.
 portMUX_TYPE g_hx711_mux = portMUX_INITIALIZER_UNLOCKED;
-
-std::int32_t sign_extend24(std::uint32_t v) noexcept {
-    if ((v & 0x0080'0000U) != 0U) {
-        v |= 0xFF00'0000U;
-    }
-    return static_cast<std::int32_t>(v);
-}
 
 hal_cpp::Status hw_fault() noexcept {
     return hal_cpp::Status(hal_cpp::Error::kHardwareFault);
