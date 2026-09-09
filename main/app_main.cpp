@@ -39,6 +39,7 @@
 #include "ssd1306/ssd1306_display.hpp"
 #include "tsic306/tsic306_decoder.hpp"
 #include "tsic306/tsic306_driver.hpp"
+#include "valve/solenoid_valve.hpp"
 #include "wifi/esp_wifi_network.hpp"
 
 namespace {
@@ -233,6 +234,7 @@ std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
 std::atomic<bool> g_mqtt_connected{false};
 std::atomic<bool> g_emergency_stop{false};
+std::atomic<bool> g_steam_active{false};
 SemaphoreHandle_t g_i2c_bus_mutex = nullptr;
 
 TickType_t ticks_from_ms(std::uint32_t ms) noexcept {
@@ -1556,6 +1558,12 @@ void control_task(void* arg) {
         const float pid_tv_s = g_runtime_control.pid_tv_s.load(std::memory_order_relaxed);
         const float brew_setpoint_c =
             g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
+        const bool steam_active =
+            g_steam_active.load(std::memory_order_relaxed);
+        const float steam_setpoint_c =
+            g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed);
+        const float active_setpoint_c =
+            steam_active ? steam_setpoint_c : brew_setpoint_c;
 
         espid::pid::Controller::Config pcfg{};
         pcfg.kp = pid_kp;
@@ -1570,7 +1578,7 @@ void control_task(void* arg) {
 
         float duty_pct = 0.0F;
         if (sample_fresh && std::isfinite(temp_c) && !emergency_stop) {
-            duty_pct = controller.update(brew_setpoint_c, temp_c);
+            duty_pct = controller.update(active_setpoint_c, temp_c);
         } else {
             controller.reset();
             duty_pct = 0.0F;
@@ -1745,7 +1753,8 @@ void display_task(void* arg) {
 // runs it through the BrewButton debounce filter, and toggles the
 // ShotTimer on each debounced press (release is ignored: the timer is
 // edge-triggered so a quick tap starts it and another tap stops it).
-void button_task(void* /*arg*/) {
+void button_task(void* arg) {
+    auto* valve = static_cast<espid::valve::SolenoidValve*>(arg);
     ESP_LOGI(kTag, "button_task: running on core %d (gpio=%d)",
              xPortGetCoreID(), static_cast<int>(cfg::brew::kButtonGpio));
 
@@ -1764,11 +1773,17 @@ void button_task(void* /*arg*/) {
         if (ev == espid::brew::BrewButton::Event::kPressed) {
             if (timer.running()) {
                 timer.stop(now_ms);
+                if (valve != nullptr) {
+                    (void)valve->close();
+                }
                 ESP_LOGI(kTag, "brew: stop  elapsed=%u ms",
                          static_cast<unsigned>(timer.elapsed_ms(now_ms)));
             } else {
                 timer.reset();
                 timer.start(now_ms);
+                if (valve != nullptr) {
+                    (void)valve->open();
+                }
                 ESP_LOGI(kTag, "brew: start");
             }
         }
@@ -1778,6 +1793,35 @@ void button_task(void* /*arg*/) {
         g_shot.running.store(timer.running(), std::memory_order_relaxed);
 
         vTaskDelay(pdMS_TO_TICKS(cfg::brew::kPollPeriodMs));
+    }
+}
+
+// Polled steam-switch task.  Debounced latching input; publishes the
+// steam-mode flag consumed by control_task to select the setpoint.
+void steam_task(void* /*arg*/) {
+    ESP_LOGI(kTag, "steam_task: running on core %d (gpio=%d)",
+             xPortGetCoreID(), static_cast<int>(cfg::steam::kSwitchGpio));
+
+    espid::brew::BrewButton::Config scfg{};
+    scfg.active_low  = !cfg::steam::kSwitchActiveHigh;
+    scfg.debounce_ms = cfg::steam::kDebounceMs;
+    espid::brew::BrewButton sw(scfg);
+
+    bool last = false;
+    for (;;) {
+        const int           raw    = gpio_get_level(cfg::steam::kSwitchGpio);
+        const std::uint64_t now_ms = static_cast<std::uint64_t>(
+            esp_timer_get_time() / 1000);
+
+        (void)sw.poll(raw != 0, now_ms);
+        const bool active = sw.is_pressed();
+        if (active != last) {
+            g_steam_active.store(active, std::memory_order_relaxed);
+            ESP_LOGI(kTag, "steam: %s", active ? "ON" : "OFF");
+            last = active;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(cfg::steam::kPollPeriodMs));
     }
 }
 
@@ -1799,6 +1843,7 @@ extern "C" void app_main(void) {
     static espid::heater::SlowPwmSsrHeater heater;
     static espid::abp2::Abp2Driver         pressure;
     static espid::pump::PsmPump            pump;
+    static espid::valve::SolenoidValve     valve;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
     const auto                                  s = driver.init(drv_cfg);
@@ -1881,6 +1926,23 @@ extern "C" void app_main(void) {
             (void)pump.set_power_pct(0.0F);
             ESP_LOGI(kTag, "pump PSM ready (zc=%d gate=%d)",
                      pump_cfg.zero_cross_gpio, pump_cfg.gate_gpio);
+        }
+    }
+
+    // 3-way solenoid valve output; starts closed, opened during brew.
+    bool valve_ready = false;
+    if (cfg::valve::kEnabled) {
+        espid::valve::SolenoidValve::Config vcfg{};
+        vcfg.gpio        = static_cast<int>(cfg::valve::kRelayGpio);
+        vcfg.active_high = cfg::valve::kActiveHigh;
+
+        const auto vs = valve.init(vcfg);
+        if (!vs.ok()) {
+            ESP_LOGW(kTag, "valve init failed: %s - valve disabled",
+                     espid::hal_cpp::to_string(vs.error()));
+        } else {
+            valve_ready = true;
+            ESP_LOGI(kTag, "valve ready on gpio=%d", vcfg.gpio);
         }
     }
 
@@ -2031,10 +2093,34 @@ extern "C" void app_main(void) {
                      esp_err_to_name(err));
         } else {
             ok = xTaskCreatePinnedToCore(
-                &button_task, "button", cfg::brew::kTaskStackBytes, nullptr,
+                &button_task, "button", cfg::brew::kTaskStackBytes,
+                valve_ready ? &valve : nullptr,
                 cfg::brew::kTaskPriority, nullptr, cfg::brew::kTaskCore);
             if (ok != pdPASS) {
                 ESP_LOGW(kTag, "button_task create failed - no brew control");
+            }
+        }
+    }
+
+    // Steam switch: latching input that selects the steam setpoint.
+    if (cfg::steam::kEnabled) {
+        gpio_config_t scfg{};
+        scfg.pin_bit_mask = 1ULL << static_cast<int>(cfg::steam::kSwitchGpio);
+        scfg.mode         = GPIO_MODE_INPUT;
+        scfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+        scfg.pull_down_en = cfg::steam::kPulldownEnable
+                                ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE;
+        scfg.intr_type    = GPIO_INTR_DISABLE;
+        const esp_err_t err = gpio_config(&scfg);
+        if (err != ESP_OK) {
+            ESP_LOGW(kTag, "steam switch gpio_config failed: %s - skipping",
+                     esp_err_to_name(err));
+        } else {
+            ok = xTaskCreatePinnedToCore(
+                &steam_task, "steam", cfg::brew::kTaskStackBytes, nullptr,
+                cfg::brew::kTaskPriority, nullptr, cfg::brew::kTaskCore);
+            if (ok != pdPASS) {
+                ESP_LOGW(kTag, "steam_task create failed - no steam switch");
             }
         }
     }

@@ -23,6 +23,7 @@ idf_component_register(
         pid
         abp2
         pump
+        valve
 )
 
 # Modern C++ for application code.
