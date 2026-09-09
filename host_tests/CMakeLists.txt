@@ -67,6 +67,12 @@ target_include_directories(espid_heater INTERFACE
     ${REPO_ROOT}/components/heater/include
 )
 
+# pump PSM firing-delay core is header-only and host-testable.
+add_library(espid_pump INTERFACE)
+target_include_directories(espid_pump INTERFACE
+    ${REPO_ROOT}/components/pump/include
+)
+
 # ---------------- Test binary ----------------
 add_executable(espid_unit_tests
     test_sanity.cpp
@@ -75,6 +81,7 @@ add_executable(espid_unit_tests
     test_pid.cpp
     test_brew.cpp
     test_heater.cpp
+    test_psm.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder
@@ -82,6 +89,7 @@ target_link_libraries(espid_unit_tests PRIVATE
     espid_pid
     espid_brew
     espid_heater
+    espid_pump
     GTest::gtest_main
     GTest::gmock
 )
