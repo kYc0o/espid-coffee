@@ -73,6 +73,12 @@ target_include_directories(espid_pump INTERFACE
     ${REPO_ROOT}/components/pump/include
 )
 
+# scale dual-cell weight core is header-only and host-testable.
+add_library(espid_scale INTERFACE)
+target_include_directories(espid_scale INTERFACE
+    ${REPO_ROOT}/components/scale/include
+)
+
 # ---------------- Test binary ----------------
 add_executable(espid_unit_tests
     test_sanity.cpp
@@ -82,6 +88,7 @@ add_executable(espid_unit_tests
     test_brew.cpp
     test_heater.cpp
     test_psm.cpp
+    test_scale.cpp
 )
 target_link_libraries(espid_unit_tests PRIVATE
     espid_tsic306_decoder
@@ -90,6 +97,7 @@ target_link_libraries(espid_unit_tests PRIVATE
     espid_brew
     espid_heater
     espid_pump
+    espid_scale
     GTest::gtest_main
     GTest::gmock
 )
