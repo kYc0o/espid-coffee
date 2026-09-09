@@ -106,6 +106,20 @@ constexpr float         kPreinfusionPauseMaxS = 30.0F;
 }  // namespace brew
 
 // ---------------------------------------------------------------------------
+// Steam switch (mode-select input)
+// ---------------------------------------------------------------------------
+// Wired to 3V3 through the machine switch; idle state held low by the S3
+// internal pull-down, so no external resistor is required.
+namespace steam {
+constexpr bool          kEnabled        = true;
+constexpr gpio_num_t    kSwitchGpio     = GPIO_NUM_4;
+constexpr bool          kSwitchActiveHigh = true;
+constexpr bool          kPulldownEnable   = true;
+constexpr std::uint32_t kDebounceMs       = 10;
+constexpr std::uint32_t kPollPeriodMs     = 10;
+}  // namespace steam
+
+// ---------------------------------------------------------------------------
 // PID controller (stub — not yet wired to a heater)
 // ---------------------------------------------------------------------------
 namespace pid {
@@ -148,6 +162,32 @@ constexpr std::uint32_t kPwmPeriodMs    = 1000;
 }  // namespace heater
 
 // ---------------------------------------------------------------------------
+// Solenoid valve (3-way, external relay/SSR module)
+// ---------------------------------------------------------------------------
+namespace valve {
+constexpr bool          kEnabled        = true;
+constexpr gpio_num_t    kRelayGpio      = GPIO_NUM_16;
+constexpr bool          kActiveHigh     = true;
+}  // namespace valve
+
+// ---------------------------------------------------------------------------
+// Pump (PSM phase-control dimmer: triac gate + mains zero-cross sync)
+// ---------------------------------------------------------------------------
+// The zero-cross opto pulses twice per mains cycle; the gate is retriggered
+// each half-cycle at the computed phase delay.
+namespace pump {
+constexpr bool          kEnabled             = true;
+constexpr gpio_num_t    kPsmGpio             = GPIO_NUM_17;  // triac gate out
+constexpr bool          kPsmActiveHigh       = true;
+constexpr gpio_num_t    kZeroCrossGpio       = GPIO_NUM_18;  // opto ZC input
+constexpr bool          kZeroCrossActiveHigh = true;
+constexpr std::uint32_t kMainsFrequencyHz    = 50;           // 100 Hz half-cycles
+constexpr float         kDefaultPowerPct     = 100.0F;
+constexpr float         kPowerMinPct         = 0.0F;
+constexpr float         kPowerMaxPct         = 100.0F;
+}  // namespace pump
+
+// ---------------------------------------------------------------------------
 // Pressure sensor (Honeywell ABP2, I2C)
 // ---------------------------------------------------------------------------
 namespace pressure {
@@ -175,6 +215,26 @@ constexpr std::uint32_t kOutputMaxCounts = 15'099'494;
 constexpr float         kPressureMinPsi = 0.0F;
 constexpr float         kPressureMaxPsi = 145.038F;
 }  // namespace pressure
+
+// ---------------------------------------------------------------------------
+// Brew scale (dual HX711 — one load cell per side of the drip tray)
+// ---------------------------------------------------------------------------
+// Both HX711 share the clock line; each exposes its own data line. Total
+// weight is the sum of the two calibrated cell readings.
+namespace scale {
+constexpr bool          kEnabled        = true;
+constexpr std::uint8_t  kHx711Count     = 2;
+constexpr gpio_num_t    kData1Gpio      = GPIO_NUM_7;
+constexpr gpio_num_t    kData2Gpio      = GPIO_NUM_10;
+constexpr gpio_num_t    kClockGpio      = GPIO_NUM_21;  // shared SCK
+constexpr std::uint8_t  kSampleCount    = 2;            // averaged reads per sample
+constexpr float         kCalibrationFactor1 = 1.0F;     // raw counts per gram, cell 1
+constexpr float         kCalibrationFactor2 = 1.0F;     // raw counts per gram, cell 2
+constexpr std::uint32_t kReadPeriodMs   = 100;
+constexpr std::uint32_t kTaskStackBytes = 4096;
+constexpr std::uint32_t kTaskPriority   = 3;
+constexpr std::int32_t  kTaskCore       = 1;
+}  // namespace scale
 
 // ---------------------------------------------------------------------------
 // Networking (stub — Wi-Fi / web UI not yet implemented)
