@@ -1247,7 +1247,7 @@ void pressure_task(void* arg) {
                 g_pressure.valid.store(false, std::memory_order_release);
             }
             if (errors == 1U || (errors % 10U) == 0U) {
-                ESP_LOGW(kTag, "pressure read error: %s (n=" PRIu32 ")",
+                ESP_LOGW(kTag, "pressure read error: %s (n=%" PRIu32 ")",
                          espid::hal_cpp::to_string(sample_error), errors);
             }
 
@@ -1774,21 +1774,19 @@ void button_task(void* arg) {
 
         const auto ev = btn.poll(raw != 0, now_ms);
         if (ev == espid::brew::BrewButton::Event::kPressed) {
-            if (timer.running()) {
-                timer.stop(now_ms);
-                if (valve != nullptr) {
-                    (void)valve->close();
-                }
-                ESP_LOGI(kTag, "brew: stop  elapsed=%u ms",
-                         static_cast<unsigned>(timer.elapsed_ms(now_ms)));
-            } else {
-                timer.reset();
-                timer.start(now_ms);
-                if (valve != nullptr) {
-                    (void)valve->open();
-                }
-                ESP_LOGI(kTag, "brew: start");
+            timer.reset();
+            timer.start(now_ms);
+            if (valve != nullptr) {
+                (void)valve->open();
             }
+            ESP_LOGI(kTag, "brew: start");
+        } else if (ev == espid::brew::BrewButton::Event::kReleased) {
+            timer.stop(now_ms);
+            if (valve != nullptr) {
+                (void)valve->close();
+            }
+            ESP_LOGI(kTag, "brew: stop  elapsed=%u ms",
+                     static_cast<unsigned>(timer.elapsed_ms(now_ms)));
         }
 
         g_shot.elapsed_ms.store(timer.elapsed_ms(now_ms),

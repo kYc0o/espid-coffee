@@ -47,8 +47,13 @@ hal_cpp::Result<DecodedSample> decode_frame(const std::uint8_t raw[7],
                                    (static_cast<std::uint32_t>(raw[5]) << 8) |
                                    static_cast<std::uint32_t>(raw[6]));
 
-    if (pressure_counts < tf.output_min_counts ||
-        pressure_counts > tf.output_max_counts ||
+    // Clamp counts below the calibrated floor to 0 (minimum) pressure:
+    // at atmospheric/zero gauge the sensor naturally reads slightly under the
+    // nominal 10% output span floor. Treat above-max as a hard range error.
+    const std::uint32_t clamped_counts =
+        (pressure_counts < tf.output_min_counts) ? tf.output_min_counts
+                                                  : pressure_counts;
+    if (clamped_counts > tf.output_max_counts ||
         static_cast<float>(temperature_counts) > kCountsMax24) {
         return hal_cpp::Error::kRangeError;
     }
@@ -57,7 +62,7 @@ hal_cpp::Result<DecodedSample> decode_frame(const std::uint8_t raw[7],
         static_cast<float>(tf.output_max_counts - tf.output_min_counts);
     const float psi_span = tf.pressure_max_psi - tf.pressure_min_psi;
     const float pressure_psi =
-        (static_cast<float>(pressure_counts - tf.output_min_counts) * psi_span /
+        (static_cast<float>(clamped_counts - tf.output_min_counts) * psi_span /
          counts_span) +
         tf.pressure_min_psi;
     const float pressure_bar = pressure_psi * kPsiToBar;
