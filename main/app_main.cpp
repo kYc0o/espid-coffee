@@ -2163,7 +2163,8 @@ extern "C" void app_main(void) {
         bcfg.mode         = GPIO_MODE_INPUT;
         bcfg.pull_up_en   = cfg::brew::kButtonPullupEnable
                                 ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
-        bcfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        bcfg.pull_down_en = cfg::brew::kButtonPulldownEnable
+                                ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE;
         bcfg.intr_type    = GPIO_INTR_DISABLE;
         const esp_err_t err = gpio_config(&bcfg);
         if (err != ESP_OK) {

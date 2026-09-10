@@ -87,8 +87,9 @@ constexpr std::int32_t  kTaskCore          = 1;
 namespace brew {
 constexpr bool          kEnabled        = true;
 constexpr gpio_num_t    kButtonGpio     = GPIO_NUM_5;
-constexpr bool          kButtonActiveLow = true;
-constexpr bool          kButtonPullupEnable = true;  // internal fallback
+constexpr bool          kButtonActiveLow    = false;
+constexpr bool          kButtonPullupEnable  = false;
+constexpr bool          kButtonPulldownEnable = true;
 constexpr std::uint32_t kDebounceMs     = 10;
 constexpr std::uint32_t kPollPeriodMs   = 10;
 constexpr std::uint32_t kTaskStackBytes = 3072;
@@ -125,8 +126,8 @@ constexpr std::uint32_t kPollPeriodMs     = 10;
 // PID controller (stub — not yet wired to a heater)
 // ---------------------------------------------------------------------------
 namespace pid {
-constexpr float         kSetpointC      = 95.0F;
-constexpr float         kSteamSetpointC = 140.0F;
+constexpr float         kSetpointC      = 92.0F;
+constexpr float         kSteamSetpointC = 130.0F;
 constexpr float         kEmergencyStopTempC = 120.0F;
 constexpr float         kEmergencyResetTempC = 100.0F;
 constexpr float         kKp             = 30.0F;
