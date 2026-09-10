@@ -191,6 +191,26 @@ constexpr std::uint32_t kGatePulseUs         = 50;           // RobotDyn-style g
 constexpr float         kDefaultPowerPct     = 100.0F;
 constexpr float         kPowerMinPct         = 0.0F;
 constexpr float         kPowerMaxPct         = 100.0F;
+
+// Startup fill: pump runs at full power until the boiler has water.
+constexpr float          kStartupFillThresholdBar = 1.0F;
+constexpr std::uint32_t  kStartupFillTimeoutMs    = 30'000;
+constexpr float          kStartupFillPowerPct     = 100.0F;
+
+// Pressure PID: output is pump PSM power %; setpoint is target group pressure.
+// PID gains are conservative starting points — tune on the machine.
+constexpr float          kPressureSetpointBar = 9.0F;
+constexpr float          kPidKp               = 10.0F;
+constexpr float          kPidKi               = 0.5F;
+constexpr float          kPidKd               = 0.2F;
+constexpr float          kPidOutputMin        = 0.0F;
+constexpr float          kPidOutputMax        = 100.0F;
+constexpr float          kPidIntegralMin      = -20.0F;
+constexpr float          kPidIntegralMax      = 20.0F;
+constexpr float          kPidSamplePeriodS    = 0.2F;
+constexpr std::uint32_t  kTaskStackBytes      = 4096;
+constexpr std::uint32_t  kTaskPriority        = 5;
+constexpr std::int32_t   kTaskCore            = 1;
 }  // namespace pump
 
 // ---------------------------------------------------------------------------

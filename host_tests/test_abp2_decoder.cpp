@@ -69,8 +69,18 @@ TEST(Abp2Decoder, DiagnosticStatusReturnsHardwareFault) {
     EXPECT_EQ(r.error(), Error::kHardwareFault);
 }
 
-TEST(Abp2Decoder, OutOfTransferRangeReturnsRangeError) {
+TEST(Abp2Decoder, BelowMinCountsClampedToZeroPressure) {
+    // Counts below the 10% floor clamp to 0 bar instead of error
+    // (atmospheric pressure at rest sits just under the nominal minimum).
     const auto raw = make_frame(FrameStatus::kNormal, 1'000'000, 8'388'608);
+    auto r = decode_frame(raw.data(), TransferFunction{});
+    EXPECT_TRUE(r.ok());
+    EXPECT_FLOAT_EQ(r.value().pressure_psi, 0.0F);
+    EXPECT_FLOAT_EQ(r.value().pressure_bar, 0.0F);
+}
+
+TEST(Abp2Decoder, AboveMaxCountsReturnsRangeError) {
+    const auto raw = make_frame(FrameStatus::kNormal, 16'000'000, 8'388'608);
     auto r = decode_frame(raw.data(), TransferFunction{});
     EXPECT_FALSE(r.ok());
     EXPECT_EQ(r.error(), Error::kRangeError);

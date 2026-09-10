@@ -238,6 +238,7 @@ std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
 std::atomic<bool> g_mqtt_connected{false};
 std::atomic<bool> g_emergency_stop{false};
 std::atomic<bool> g_steam_active{false};
+std::atomic<bool> g_fill_complete{false};
 SemaphoreHandle_t g_i2c_bus_mutex = nullptr;
 
 TickType_t ticks_from_ms(std::uint32_t ms) noexcept {
@@ -1503,6 +1504,11 @@ void control_task(void* arg) {
     bool heater_ready = false;
 
     if (cfg::heater::kEnabled && heater != nullptr) {
+        // Wait for the startup fill to complete before heating (empty-boiler guard).
+        ESP_LOGI(kTag, "control: waiting for startup fill...");
+        while (!g_fill_complete.load(std::memory_order_acquire)) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
         espid::hal_cpp::IHeater::Config hcfg{};
         hcfg.ssr_gpio = static_cast<int>(cfg::heater::kSsrGpio);
         hcfg.active_high = cfg::heater::kSsrActiveHigh;
@@ -1749,6 +1755,85 @@ void display_task(void* arg) {
         }
 
         vTaskDelay(pdMS_TO_TICKS(cfg::oled::kRefreshPeriodMs));
+    }
+}
+
+// Pump task: startup fill then pressure-PID-controlled pump power during brew.
+struct PumpTaskCtx {
+    espid::pump::PsmPump* psm;
+};
+
+void pump_task(void* arg) {
+    auto* ctx = static_cast<PumpTaskCtx*>(arg);
+    ESP_LOGI(kTag, "pump_task: running on core %d", xPortGetCoreID());
+
+    // Phase 1: startup fill — run pump until pressure >= threshold or timeout.
+    // This ensures the boiler has water before the heater is allowed to start.
+    ESP_LOGI(kTag, "pump: waiting for pressure sensor...");
+    while (!g_pressure.valid.load(std::memory_order_acquire)) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGI(kTag, "pump: startup fill (target %.1f bar, timeout %u s)",
+             static_cast<double>(cfg::pump::kStartupFillThresholdBar),
+             static_cast<unsigned>(cfg::pump::kStartupFillTimeoutMs / 1000U));
+
+    (void)ctx->psm->set_power_pct(cfg::pump::kStartupFillPowerPct);
+    const std::uint64_t fill_deadline_ms =
+        static_cast<std::uint64_t>(esp_timer_get_time() / 1000) +
+        cfg::pump::kStartupFillTimeoutMs;
+    for (;;) {
+        const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
+        if (p >= cfg::pump::kStartupFillThresholdBar) {
+            ESP_LOGI(kTag, "pump: fill done (p=%.2f bar)", static_cast<double>(p));
+            break;
+        }
+        if (static_cast<std::uint64_t>(esp_timer_get_time() / 1000) >= fill_deadline_ms) {
+            ESP_LOGW(kTag, "pump: fill timeout — check water supply");
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    (void)ctx->psm->set_power_pct(0.0F);
+    g_fill_complete.store(true, std::memory_order_release);
+    ESP_LOGI(kTag, "pump: ready for brewing");
+
+    // Phase 2: pressure PID — drives pump power during brew to maintain setpoint.
+    espid::pid::Controller pid;
+    espid::pid::Controller::Config pcfg{};
+    pcfg.kp             = cfg::pump::kPidKp;
+    pcfg.ki             = cfg::pump::kPidKi;
+    pcfg.kd             = cfg::pump::kPidKd;
+    pcfg.output_min     = cfg::pump::kPidOutputMin;
+    pcfg.output_max     = cfg::pump::kPidOutputMax;
+    pcfg.integral_min   = cfg::pump::kPidIntegralMin;
+    pcfg.integral_max   = cfg::pump::kPidIntegralMax;
+    pcfg.sample_period_s = cfg::pump::kPidSamplePeriodS;
+    pid.set_config(pcfg);
+
+    const TickType_t period = ticks_from_ms(
+        static_cast<std::uint32_t>(cfg::pump::kPidSamplePeriodS * 1000.0F));
+
+    std::uint32_t log_div = 0;
+    for (;;) {
+        const bool brewing = g_shot.running.load(std::memory_order_relaxed);
+        if (brewing) {
+            if (g_pressure.valid.load(std::memory_order_acquire)) {
+                const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
+                const float power = pid.update(cfg::pump::kPressureSetpointBar, p);
+                (void)ctx->psm->set_power_pct(power);
+                if ((++log_div % 10U) == 0U) {
+                    ESP_LOGI(kTag, "pump: p=%.2fbar power=%.1f%%",
+                             static_cast<double>(p), static_cast<double>(power));
+                }
+            } else {
+                // No pressure reading yet — run at full power as fallback.
+                (void)ctx->psm->set_power_pct(cfg::pump::kDefaultPowerPct);
+            }
+        } else {
+            pid.reset();
+            (void)ctx->psm->set_power_pct(0.0F);
+        }
+        vTaskDelay(period);
     }
 }
 
@@ -2140,6 +2225,19 @@ extern "C" void app_main(void) {
         if (ok != pdPASS) {
             ESP_LOGW(kTag, "pressure_task create failed - continuing without pressure");
         }
+    }
+
+    if (cfg::pump::kEnabled) {
+        static PumpTaskCtx pump_ctx{&pump};
+        ok = xTaskCreatePinnedToCore(
+            &pump_task, "pump", cfg::pump::kTaskStackBytes, &pump_ctx,
+            cfg::pump::kTaskPriority, nullptr, cfg::pump::kTaskCore);
+        if (ok != pdPASS) {
+            ESP_LOGW(kTag, "pump_task create failed - fill skipped");
+            g_fill_complete.store(true, std::memory_order_relaxed);
+        }
+    } else {
+        g_fill_complete.store(true, std::memory_order_relaxed);
     }
 
     if (ds.ok() && pressure_ready &&
