@@ -1888,7 +1888,19 @@ extern "C" void app_main(void) {
     static espid::scale::Hx711Scale        scale_hw;
 
     const espid::tsic306::Tsic306Driver::Config drv_cfg{cfg::tsic::kDataGpio, 0};
-    const auto                                  s = driver.init(drv_cfg);
+
+    // Power the TSIC306 from GPIO2 (draws <1 mA, well within GPIO source limit).
+    gpio_config_t tsic_pwr_cfg{};
+    tsic_pwr_cfg.pin_bit_mask = 1ULL << static_cast<unsigned>(cfg::tsic::kPowerGpio);
+    tsic_pwr_cfg.mode         = GPIO_MODE_OUTPUT;
+    tsic_pwr_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+    tsic_pwr_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    tsic_pwr_cfg.intr_type    = GPIO_INTR_DISABLE;
+    (void)gpio_config(&tsic_pwr_cfg);
+    gpio_set_level(cfg::tsic::kPowerGpio, 1);
+    vTaskDelay(pdMS_TO_TICKS(cfg::tsic::kPowerOnDelayMs));
+
+    const auto s = driver.init(drv_cfg);
     if (!s.ok()) {
         ESP_LOGE(kTag, "TSIC driver init failed: %s - halting",
                  espid::hal_cpp::to_string(s.error()));

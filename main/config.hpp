@@ -50,6 +50,8 @@ constexpr const char* kLogTag = "espid";
 // ---------------------------------------------------------------------------
 namespace tsic {
 constexpr gpio_num_t    kDataGpio       = GPIO_NUM_1;
+constexpr gpio_num_t    kPowerGpio      = GPIO_NUM_2;  // GPIO-sourced VDD; saves a 3V3 rail output
+constexpr std::uint32_t kPowerOnDelayMs = 5;           // TSIC VDD ramp + startup
 constexpr std::uint32_t kFrameTimeoutMs = 500;
 constexpr std::uint32_t kMaxConsecutiveSensorErrors = 3;
 constexpr std::uint32_t kTaskStackBytes = 4096;
