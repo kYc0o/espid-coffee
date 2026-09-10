@@ -158,7 +158,7 @@ constexpr float         kSteamSetpointMaxC = 170.0F;
 // ---------------------------------------------------------------------------
 namespace heater {
 constexpr bool          kEnabled        = false;
-constexpr gpio_num_t    kSsrGpio        = GPIO_NUM_15;
+constexpr gpio_num_t    kSsrGpio        = GPIO_NUM_19;
 constexpr bool          kSsrActiveHigh  = true;
 constexpr std::uint32_t kPwmPeriodMs    = 1000;
 }  // namespace heater

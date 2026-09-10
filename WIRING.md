@@ -41,7 +41,7 @@ this file is the human-facing companion for bench and in-machine work.
 | Temp sensor TSIC306 (ZACwire) | `GPIO1` | in | **none** | Sensor drives push-pull; 3.3 V signal. |
 | OLED + pressure **I²C SDA** | `GPIO8` | bidir | **4.7 kΩ → 3V3** | Shared bus. See §3. |
 | OLED + pressure **I²C SCL** | `GPIO9` | bidir | **4.7 kΩ → 3V3** | Shared bus. See §3. |
-| Heater **SSR** | `GPIO15` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
+| Heater **SSR** | `GPIO19` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
 | Brew switch | `GPIO5` | in | internal (see note) | Config wires it active-**low** with internal pull-**up**. |
 | Steam switch | `GPIO4` | in | internal pull-**down** | Switch to 3V3; `kPulldownEnable = true`. |
 | Valve relay (3-way) | `GPIO16` | out | none | Isolated relay module. |
