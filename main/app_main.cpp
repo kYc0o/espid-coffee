@@ -1247,7 +1247,7 @@ void pressure_task(void* arg) {
                 g_pressure.valid.store(false, std::memory_order_release);
             }
             if (errors == 1U || (errors % 10U) == 0U) {
-                ESP_LOGW(kTag, "pressure read error: %s (n=%" PRIu32 ")",
+                ESP_LOGW(kTag, "pressure read error: %s (n=" PRIu32 ")",
                          espid::hal_cpp::to_string(sample_error), errors);
             }
 
@@ -1906,8 +1906,13 @@ extern "C" void app_main(void) {
         /* reset_pin     */ GPIO_NUM_NC,
         /* rotation      */ oled_rotation(),
     };
-    const auto ds = display.init(dsp_cfg);
-    if (!ds.ok()) {
+    const espid::hal_cpp::Status ds =
+        cfg::oled::kEnabled
+            ? display.init(dsp_cfg)
+            : espid::hal_cpp::Status(espid::hal_cpp::Error::kNotInitialised);
+    if (!cfg::oled::kEnabled) {
+        ESP_LOGI(kTag, "OLED disabled in config - running headless");
+    } else if (!ds.ok()) {
         // OLED is non-critical: continue without it.
         ESP_LOGW(kTag, "OLED init failed: %s - continuing headless",
                  espid::hal_cpp::to_string(ds.error()));
