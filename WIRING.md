@@ -37,6 +37,7 @@ this file is the human-facing companion for bench and in-machine work.
 
 | Function | S3 GPIO | Dir | Pull resistor | Notes |
 |---|---|---|---|---|
+| Temp sensor TSIC306 VDD | `GPIO2` | out | **none** | GPIO-sourced power; IO2 is physically adjacent to IO1 on MRD076A. |
 | Temp sensor TSIC306 (ZACwire) | `GPIO1` | in | **none** | Sensor drives push-pull; 3.3 V signal. |
 | OLED + pressure **I²C SDA** | `GPIO8` | bidir | **4.7 kΩ → 3V3** | Shared bus. See §3. |
 | OLED + pressure **I²C SCL** | `GPIO9` | bidir | **4.7 kΩ → 3V3** | Shared bus. See §3. |
