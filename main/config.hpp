@@ -159,7 +159,7 @@ constexpr float         kSteamSetpointMaxC = 170.0F;
 // ---------------------------------------------------------------------------
 namespace heater {
 constexpr bool          kEnabled        = false;
-constexpr gpio_num_t    kSsrGpio        = GPIO_NUM_19;
+constexpr gpio_num_t    kSsrGpio        = GPIO_NUM_47;  // GPIO19/20 are USB D-/D+
 constexpr bool          kSsrActiveHigh  = true;
 constexpr std::uint32_t kPwmPeriodMs    = 1000;
 }  // namespace heater
@@ -180,6 +180,8 @@ constexpr bool          kActiveHigh     = true;
 // each half-cycle at the computed phase delay.
 namespace pump {
 constexpr bool          kEnabled             = true;
+constexpr gpio_num_t    kSsrGpio             = GPIO_NUM_15;  // always-on SSR; PSM triac controls power
+constexpr bool          kSsrActiveHigh       = true;
 constexpr gpio_num_t    kPsmGpio             = GPIO_NUM_17;  // triac gate out
 constexpr bool          kPsmActiveHigh       = true;
 constexpr gpio_num_t    kZeroCrossGpio       = GPIO_NUM_18;  // opto ZC input

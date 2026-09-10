@@ -1970,6 +1970,16 @@ extern "C" void app_main(void) {
 
     // PSM pump dimmer: ISR-driven, no periodic task. Starts OFF (0 %).
     if (cfg::pump::kEnabled) {
+        // Drive the pump SSR always-on; PSM triac controls actual power.
+        espid::valve::SolenoidValve::Config ssr_cfg{};
+        ssr_cfg.gpio        = static_cast<int>(cfg::pump::kSsrGpio);
+        ssr_cfg.active_high = cfg::pump::kSsrActiveHigh;
+        static espid::valve::SolenoidValve pump_ssr;
+        if (pump_ssr.init(ssr_cfg).ok()) {
+            (void)pump_ssr.open();
+            ESP_LOGI(kTag, "pump SSR always-on on gpio=%d", ssr_cfg.gpio);
+        }
+
         espid::pump::PsmPump::Config pump_cfg{};
         pump_cfg.zero_cross_gpio   = static_cast<int>(cfg::pump::kZeroCrossGpio);
         pump_cfg.gate_gpio         = static_cast<int>(cfg::pump::kPsmGpio);

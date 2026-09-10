@@ -27,7 +27,7 @@ this file is the human-facing companion for bench and in-machine work.
 |------|--------|
 | `GPIO26–37` | SPI flash + octal PSRAM (N16R8). Not usable. |
 | `GPIO0`, `GPIO3`, `GPIO45`, `GPIO46` | Strapping — pulse at boot; never use for relays/SSR. |
-| `GPIO19`, `GPIO20` | USB D-/D+ (native USB / JTAG). |
+| `GPIO19`, `GPIO20` | USB D-/D+ (native USB-JTAG/CDC — used by `/dev/cu.usbmodem`). |
 | `GPIO43`, `GPIO44` | UART0 console (TX/RX). |
 | `GPIO38`/`GPIO48` | On-board RGB LED on some DevKitC-1 revisions. |
 
@@ -41,10 +41,11 @@ this file is the human-facing companion for bench and in-machine work.
 | Temp sensor TSIC306 (ZACwire) | `GPIO1` | in | **none** | Sensor drives push-pull; 3.3 V signal. |
 | OLED + pressure **I²C SDA** | `GPIO8` | bidir | **4.7 kΩ → 3V3** | Shared bus. See §3. |
 | OLED + pressure **I²C SCL** | `GPIO9` | bidir | **4.7 kΩ → 3V3** | Shared bus. See §3. |
-| Heater **SSR** | `GPIO19` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
-| Brew switch | `GPIO5` | in | internal (see note) | Config wires it active-**low** with internal pull-**up**. |
+| Heater **SSR** | `GPIO47` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
+| Brew switch | `GPIO5` | in | internal pull-**down** | Switch sources 3V3 when closed → active-high. |
 | Steam switch | `GPIO4` | in | internal pull-**down** | Switch to 3V3; `kPulldownEnable = true`. |
 | Valve relay (3-way) | `GPIO16` | out | none | Isolated relay module. |
+| Pump **SSR** (always-on) | `GPIO15` | out | none | Driven HIGH at boot; PSM triac controls actual power. |
 | Pump **PSM** triac gate | `GPIO17` | out | none | To dimmer/triac gate. |
 | Pump **zero-cross** input | `GPIO18` | in | **10 kΩ → 3V3** (or internal pull-up) | Opto ZC, ~100 Hz pulses at 50 Hz mains. |
 | Scale HX711 #1 **DOUT** | `GPIO7` | in | none | HX711 drives push-pull. |
