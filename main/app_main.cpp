@@ -239,6 +239,7 @@ std::atomic<bool> g_mqtt_connected{false};
 std::atomic<bool> g_emergency_stop{false};
 std::atomic<bool> g_steam_active{false};
 std::atomic<bool> g_fill_complete{false};
+std::atomic<bool> g_fill_ok{false};
 SemaphoreHandle_t g_i2c_bus_mutex = nullptr;
 
 TickType_t ticks_from_ms(std::uint32_t ms) noexcept {
@@ -1509,17 +1510,24 @@ void control_task(void* arg) {
         while (!g_fill_complete.load(std::memory_order_acquire)) {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
-        espid::hal_cpp::IHeater::Config hcfg{};
-        hcfg.ssr_gpio = static_cast<int>(cfg::heater::kSsrGpio);
-        hcfg.active_high = cfg::heater::kSsrActiveHigh;
-        hcfg.pwm_period_ms = cfg::heater::kPwmPeriodMs;
-        const auto hs = heater->init(hcfg);
-        if (hs.ok()) {
-            heater_ready = true;
-            ESP_LOGI(kTag, "heater initialised on gpio=%d", hcfg.ssr_gpio);
+        if (!g_fill_ok.load(std::memory_order_acquire)) {
+            ESP_LOGE(kTag,
+                     "control: boiler not filled to %.1f bar - heater stays OFF "
+                     "(dry-boiler guard); refill and reboot",
+                     static_cast<double>(cfg::pump::kStartupFillThresholdBar));
         } else {
-            ESP_LOGE(kTag, "heater init failed: %s",
-                     espid::hal_cpp::to_string(hs.error()));
+            espid::hal_cpp::IHeater::Config hcfg{};
+            hcfg.ssr_gpio = static_cast<int>(cfg::heater::kSsrGpio);
+            hcfg.active_high = cfg::heater::kSsrActiveHigh;
+            hcfg.pwm_period_ms = cfg::heater::kPwmPeriodMs;
+            const auto hs = heater->init(hcfg);
+            if (hs.ok()) {
+                heater_ready = true;
+                ESP_LOGI(kTag, "heater initialised on gpio=%d", hcfg.ssr_gpio);
+            } else {
+                ESP_LOGE(kTag, "heater init failed: %s",
+                         espid::hal_cpp::to_string(hs.error()));
+            }
         }
     }
 
@@ -1781,21 +1789,24 @@ void pump_task(void* arg) {
     const std::uint64_t fill_deadline_ms =
         static_cast<std::uint64_t>(esp_timer_get_time() / 1000) +
         cfg::pump::kStartupFillTimeoutMs;
+    bool fill_ok = false;
     for (;;) {
         const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
         if (p >= cfg::pump::kStartupFillThresholdBar) {
+            fill_ok = true;
             ESP_LOGI(kTag, "pump: fill done (p=%.2f bar)", static_cast<double>(p));
             break;
         }
         if (static_cast<std::uint64_t>(esp_timer_get_time() / 1000) >= fill_deadline_ms) {
-            ESP_LOGW(kTag, "pump: fill timeout — check water supply");
+            ESP_LOGW(kTag, "pump: fill timeout - boiler may be empty; heater stays OFF");
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     (void)ctx->psm->set_power_pct(0.0F);
+    g_fill_ok.store(fill_ok, std::memory_order_release);
     g_fill_complete.store(true, std::memory_order_release);
-    ESP_LOGI(kTag, "pump: ready for brewing");
+    ESP_LOGI(kTag, "pump: %s", fill_ok ? "ready for brewing" : "fill FAILED");
 
     // Phase 2: pressure PID — drives pump power during brew to maintain setpoint.
     espid::pid::Controller pid;
@@ -1982,6 +1993,20 @@ extern "C" void app_main(void) {
     (void)gpio_config(&tsic_pwr_cfg);
     gpio_set_level(cfg::tsic::kPowerGpio, 1);
     vTaskDelay(pdMS_TO_TICKS(cfg::tsic::kPowerOnDelayMs));
+
+    // Safety: force the heater SSR to its inactive level immediately at boot,
+    // before control_task takes over after the fill. Prevents a floating gate
+    // from energising the element during the (possibly minutes-long) fill.
+    if (cfg::heater::kEnabled) {
+        gpio_config_t htr_cfg{};
+        htr_cfg.pin_bit_mask = 1ULL << static_cast<unsigned>(cfg::heater::kSsrGpio);
+        htr_cfg.mode         = GPIO_MODE_OUTPUT;
+        htr_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+        htr_cfg.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        htr_cfg.intr_type    = GPIO_INTR_DISABLE;
+        (void)gpio_config(&htr_cfg);
+        gpio_set_level(cfg::heater::kSsrGpio, cfg::heater::kSsrActiveHigh ? 0 : 1);
+    }
 
     const auto s = driver.init(drv_cfg);
     if (!s.ok()) {

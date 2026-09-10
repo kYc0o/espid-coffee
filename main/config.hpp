@@ -158,7 +158,7 @@ constexpr float         kSteamSetpointMaxC = 170.0F;
 // Heater (slow-PWM SSR)
 // ---------------------------------------------------------------------------
 namespace heater {
-constexpr bool          kEnabled        = false;
+constexpr bool          kEnabled        = true;
 constexpr gpio_num_t    kSsrGpio        = GPIO_NUM_47;  // GPIO19/20 are USB D-/D+
 constexpr bool          kSsrActiveHigh  = true;
 constexpr std::uint32_t kPwmPeriodMs    = 1000;
@@ -194,7 +194,7 @@ constexpr float         kPowerMaxPct         = 100.0F;
 
 // Startup fill: pump runs at full power until the boiler has water.
 constexpr float          kStartupFillThresholdBar = 1.0F;
-constexpr std::uint32_t  kStartupFillTimeoutMs    = 30'000;
+constexpr std::uint32_t  kStartupFillTimeoutMs    = 120'000;  // empty boiler takes a while
 constexpr float          kStartupFillPowerPct     = 100.0F;
 
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
