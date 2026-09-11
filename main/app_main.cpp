@@ -2191,19 +2191,10 @@ extern "C" void app_main(void) {
 
             const auto ws = wifi.init(wifi_cfg);
             if (!ws.ok()) {
-                ESP_LOGE(kTag, "Wi-Fi init failed: %s",
+                // Non-fatal: the driver often returns ESP_ERR_WIFI_CONN on a
+                // first-attempt transient and self-heals. Log and continue.
+                ESP_LOGW(kTag, "Wi-Fi init error: %s - proceeding, driver will retry",
                          espid::hal_cpp::to_string(ws.error()));
-                if (ds.ok()) {
-                    display.clear();
-                    display.draw_text(0, 12, espid::hal_cpp::Font::kSmall,
-                                      "Wi-Fi init failed");
-                    display.draw_text(0, 30, espid::hal_cpp::Font::kSmall,
-                                      "Check logs");
-                    (void)display.flush();
-                }
-                for (;;) {
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                }
             }
 
             g_network = &wifi;
@@ -2225,7 +2216,6 @@ extern "C" void app_main(void) {
                     ESP_LOGI(kTag, "Wi-Fi ready (%s, ip=%s)",
                              espid::hal_cpp::to_string(wifi_state),
                              wifi_ip.data());
-                    // Disable power-save so all GPIO outputs stay driven.
                     esp_wifi_set_ps(WIFI_PS_NONE);
                     break;
                 }
