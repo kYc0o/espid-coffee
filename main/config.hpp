@@ -332,4 +332,18 @@ constexpr std::uint32_t kTaskPriority   = 2;
 constexpr std::int32_t  kTaskCore       = 1;
 }  // namespace mqtt
 
+// ---------------------------------------------------------------------------
+// HawkBit OTA (Direct Device Integration)
+// ---------------------------------------------------------------------------
+namespace hawkbit {
+constexpr bool          kEnabled         = true;
+constexpr std::size_t   kServerUrlMaxLen = 96;
+constexpr std::size_t   kTokenMaxLen     = 64;
+constexpr std::uint32_t kPollIntervalMs  = 300'000;  // 5 min
+constexpr std::uint32_t kTaskStackBytes  = 8192;     // JSON + OTA stack
+constexpr std::uint32_t kTaskPriority    = 1;        // lowest — background
+constexpr std::int32_t  kTaskCore        = 0;        // CPU0, frees CPU1 for RT tasks
+constexpr const char*   kDefaultTenant   = "DEFAULT";
+}  // namespace hawkbit
+
 }  // namespace espid::config

@@ -25,6 +25,7 @@ idf_component_register(
         pump
         valve
         scale
+        hawkbit
 )
 
 # Modern C++ for application code.

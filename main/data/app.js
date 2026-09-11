@@ -17,7 +17,8 @@
     'brew_sp', 'steam_sp',
     'brew_t', 'preinf_t', 'preinf_pause_t',
     'mqtt_host', 'mqtt_port',
-    'mqtt_user', 'mqtt_pass', 'mqtt_client'
+    'mqtt_user', 'mqtt_pass', 'mqtt_client',
+    'hb_server', 'hb_token'
   ];
 
   fetch('/api/settings')

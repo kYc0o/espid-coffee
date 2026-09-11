@@ -44,6 +44,8 @@
 #include "valve/solenoid_valve.hpp"
 #include "wifi/esp_wifi_network.hpp"
 #include "esp_wifi.h"
+#include "hawkbit/hawkbit_client.hpp"
+#include "esp_system.h"
 
 namespace {
 
@@ -205,6 +207,8 @@ constexpr const char* kCfgPumpKp = "pump_kp";
 constexpr const char* kCfgPumpKi = "pump_ki";
 constexpr const char* kCfgPumpKd = "pump_kd";
 constexpr const char* kCfgBrewingBias = "brew_bias";
+constexpr const char* kCfgHawkbitServer = "hb_server";
+constexpr const char* kCfgHawkbitToken  = "hb_token";
 constexpr const char* kCfgBrewSetpoint = "brew_sp";
 constexpr const char* kCfgSteamSetpoint = "steam_sp";
 constexpr const char* kCfgBrewTime = "brew_t";
@@ -799,7 +803,12 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     (void)load_setting_from_nvs(kCfgMqttClientId, cfg::mqtt::kClientId,
                                 mqtt_client, sizeof(mqtt_client));
 
-    char json[1024];
+    char hb_server[cfg::hawkbit::kServerUrlMaxLen + 1]{};
+    char hb_token[cfg::hawkbit::kTokenMaxLen + 1]{};
+    (void)load_setting_from_nvs(kCfgHawkbitServer, "", hb_server, sizeof(hb_server));
+    (void)load_setting_from_nvs(kCfgHawkbitToken,  "", hb_token,  sizeof(hb_token));
+
+    char json[1200];
     const int n = std::snprintf(json, sizeof(json),
         "{\"ap_ssid\":\"%s\",\"wifi_ssid\":\"%s\","
         "\"pid_kp\":\"%s\",\"pid_tn\":\"%s\",\"pid_tv\":\"%s\","
@@ -808,7 +817,8 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
         "\"brew_sp\":\"%s\",\"steam_sp\":\"%s\","
         "\"brew_t\":\"%s\",\"preinf_t\":\"%s\",\"preinf_pause_t\":\"%s\","
         "\"mqtt_host\":\"%s\",\"mqtt_port\":\"%s\","
-        "\"mqtt_user\":\"%s\",\"mqtt_pass\":\"%s\",\"mqtt_client\":\"%s\"}",
+        "\"mqtt_user\":\"%s\",\"mqtt_pass\":\"%s\",\"mqtt_client\":\"%s\","
+        "\"hb_server\":\"%s\",\"hb_token\":\"%s\"}",
         configured_ap_ssid(),
         g_saved_sta_ssid,
         pid_kp, pid_tn, pid_tv,
@@ -816,7 +826,8 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
         brew_bias,
         brew_sp, steam_sp,
         brew_t, preinf_t, preinf_pause_t,
-        mqtt_host, mqtt_port, mqtt_user, mqtt_pass, mqtt_client);
+        mqtt_host, mqtt_port, mqtt_user, mqtt_pass, mqtt_client,
+        hb_server, hb_token);
 
     if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(json)) {
         return httpd_resp_send_500(req);
@@ -1009,6 +1020,17 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
                                     mqtt_client_txt, sizeof(mqtt_client_txt));
     }
 
+    char hb_server_txt[cfg::hawkbit::kServerUrlMaxLen + 1]{};
+    char hb_token_txt[cfg::hawkbit::kTokenMaxLen + 1]{};
+    if (!form_field(body, "hb_server", hb_server_txt, sizeof(hb_server_txt))) {
+        (void)load_setting_from_nvs(kCfgHawkbitServer, "",
+                                    hb_server_txt, sizeof(hb_server_txt));
+    }
+    if (!form_field(body, "hb_token", hb_token_txt, sizeof(hb_token_txt))) {
+        (void)load_setting_from_nvs(kCfgHawkbitToken, "",
+                                    hb_token_txt, sizeof(hb_token_txt));
+    }
+
     float pid_kp = 0.0F;
     float pid_tn = 0.0F;
     float pid_tv = 0.0F;
@@ -1119,7 +1141,9 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
         {kCfgMqttPort, mqtt_port_txt},
         {kCfgMqttUsername, mqtt_user_txt},
         {kCfgMqttPassword, mqtt_pass_txt},
-        {kCfgMqttClientId, mqtt_client_txt},
+        {kCfgMqttClientId,   mqtt_client_txt},
+        {kCfgHawkbitServer,  hb_server_txt},
+        {kCfgHawkbitToken,   hb_token_txt},
     };
 
     for (const auto& e : entries) {
@@ -2013,6 +2037,39 @@ void pump_task(void* arg) {
             (void)ctx->psm->set_power_pct(0.0F);
         }
         vTaskDelay(period);
+    }
+}
+
+// OTA task: polls HawkBit every kPollIntervalMs for firmware updates.
+void hawkbit_task(void* /*arg*/) {
+    // Wait for Wi-Fi before first poll.
+    while (!g_fill_complete.load(std::memory_order_acquire)) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(kTag, "hawkbit_task: running (poll every %u s)",
+             cfg::hawkbit::kPollIntervalMs / 1000U);
+
+    for (;;) {
+        char server[cfg::hawkbit::kServerUrlMaxLen + 1]{};
+        char token[cfg::hawkbit::kTokenMaxLen + 1]{};
+        (void)load_setting_from_nvs(kCfgHawkbitServer, "", server, sizeof(server));
+        (void)load_setting_from_nvs(kCfgHawkbitToken,  "", token,  sizeof(token));
+
+        if (server[0] != '\0') {
+            espid::hawkbit::Config hb_cfg{};
+            hb_cfg.server_url     = server;
+            hb_cfg.tenant         = cfg::hawkbit::kDefaultTenant;
+            hb_cfg.device_id      = cfg::mqtt::kClientId;
+            hb_cfg.security_token = token;
+
+            if (espid::hawkbit::poll_and_apply(hb_cfg)) {
+                ESP_LOGI(kTag, "hawkbit: new firmware installed — rebooting");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                esp_restart();
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(cfg::hawkbit::kPollIntervalMs));
     }
 }
 
