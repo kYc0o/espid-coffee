@@ -2042,9 +2042,10 @@ void pump_task(void* arg) {
 
 // OTA task: polls HawkBit every kPollIntervalMs for firmware updates.
 void hawkbit_task(void* /*arg*/) {
-    // Wait for Wi-Fi before first poll.
-    while (!g_fill_complete.load(std::memory_order_acquire)) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    // Wait for Wi-Fi STA connection before first poll.
+    while (g_network == nullptr ||
+           g_network->state() != espid::hal_cpp::WifiState::kConnected) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
     ESP_LOGI(kTag, "hawkbit_task: running (poll every %u s)",
              cfg::hawkbit::kPollIntervalMs / 1000U);
