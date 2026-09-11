@@ -1176,8 +1176,9 @@ bool start_http_server() noexcept {
     }
 
     httpd_config_t http_cfg = HTTPD_DEFAULT_CONFIG();
-    http_cfg.server_port = static_cast<int>(cfg::net::kHttpPort);
+    http_cfg.server_port    = static_cast<int>(cfg::net::kHttpPort);
     http_cfg.lru_purge_enable = true;
+    http_cfg.stack_size     = 8192;  // default 4096 is too small for settings handler
 
     esp_err_t err = httpd_start(&g_http_server, &http_cfg);
     if (err != ESP_OK) {
