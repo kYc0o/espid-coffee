@@ -197,10 +197,10 @@ esp_err_t download_and_flash(const char* url, const char* token) noexcept {
     return esp_ota_set_boot_partition(update_part);
 }
 
-void send_feedback(const char* dep_url, const char* token,
+void send_feedback(const char* dep_url_base, const char* token,
                    const char* action_id, bool success) noexcept {
     char fb_url[256];
-    std::snprintf(fb_url, sizeof(fb_url), "%s/feedback", dep_url);
+    std::snprintf(fb_url, sizeof(fb_url), "%s/feedback", dep_url_base);
 
     char body[256];
     std::snprintf(body, sizeof(body),
@@ -212,7 +212,12 @@ void send_feedback(const char* dep_url, const char* token,
         success ? "success" : "failure",
         success ? "Firmware applied" : "Flash failed");
 
-    http_post_json(fb_url, token, body);
+    const int st = http_post_json(fb_url, token, body);
+    if (st != 200 && st != 201) {
+        ESP_LOGW(kTag, "feedback POST returned %d", st);
+    } else {
+        ESP_LOGI(kTag, "feedback sent: %s", success ? "success" : "failure");
+    }
 }
 
 }  // namespace
@@ -271,10 +276,18 @@ bool poll_and_apply(const Config& cfg) noexcept {
     // Fall back to "download" key (HTTPS) if not found.
     char action_id[32];
     char dl_url[256];
+    // dep_url_base strips any "?c=..." query string for feedback URL construction.
+    char dep_url_base[256];
     {
-        // action_id = last '/' segment of dep_url
-        const char* last_slash = std::strrchr(dep_url, '/');
-        const char* id_src     = last_slash ? last_slash + 1 : dep_url;
+        std::strncpy(dep_url_base, dep_url, sizeof(dep_url_base) - 1);
+        dep_url_base[sizeof(dep_url_base) - 1] = '\0';
+        char* q = std::strchr(dep_url_base, '?');
+        if (q) *q = '\0';
+    }
+    {
+        // action_id = last '/' segment of dep_url_base (query string already stripped)
+        const char* last_slash = std::strrchr(dep_url_base, '/');
+        const char* id_src     = last_slash ? last_slash + 1 : dep_url_base;
         std::strncpy(action_id, id_src, sizeof(action_id) - 1);
         action_id[sizeof(action_id) - 1] = '\0';
 
@@ -296,7 +309,7 @@ bool poll_and_apply(const Config& cfg) noexcept {
     const bool ok = (ota_err == ESP_OK);
     ESP_LOGI(kTag, "OTA %s", ok ? "SUCCESS — rebooting" : "FAILED");
 
-    send_feedback(dep_url, cfg.security_token, action_id, ok);
+    send_feedback(dep_url_base, cfg.security_token, action_id, ok);
 
     return ok;
 }
