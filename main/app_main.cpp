@@ -1894,14 +1894,18 @@ void pump_task(void* arg) {
         static_cast<std::uint32_t>(cfg::pump::kPidSamplePeriodS * 1000.0F));
 
     std::uint32_t log_div = 0;
+    bool was_brewing = false;
     for (;;) {
         const bool brewing = g_shot.running.load(std::memory_order_relaxed);
         if (brewing) {
-            // Reload gains every brew cycle so web-UI changes take effect.
-            pcfg.kp = g_runtime_control.pump_kp.load(std::memory_order_relaxed);
-            pcfg.ki = g_runtime_control.pump_ki.load(std::memory_order_relaxed);
-            pcfg.kd = g_runtime_control.pump_kd.load(std::memory_order_relaxed);
-            pid.set_config(pcfg);
+            if (!was_brewing) {
+                // Brew just started: reload gains from NVS/web-UI, reset state.
+                pcfg.kp = g_runtime_control.pump_kp.load(std::memory_order_relaxed);
+                pcfg.ki = g_runtime_control.pump_ki.load(std::memory_order_relaxed);
+                pcfg.kd = g_runtime_control.pump_kd.load(std::memory_order_relaxed);
+                pid.set_config(pcfg);
+            }
+            was_brewing = true;
             if (g_pressure.valid.load(std::memory_order_acquire)) {
                 const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
                 const float power = pid.update(cfg::pump::kPressureSetpointBar, p);
@@ -1915,6 +1919,7 @@ void pump_task(void* arg) {
                 (void)ctx->psm->set_power_pct(cfg::pump::kDefaultPowerPct);
             }
         } else {
+            was_brewing = false;
             pid.reset();
             (void)ctx->psm->set_power_pct(0.0F);
         }
