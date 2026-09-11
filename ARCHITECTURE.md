@@ -33,10 +33,13 @@ components, and atomic Conventional-Commits commits.
 | Temperature       | TSIC 306, ZACwire 1-wire on **GPIO 1**                    |
 | Display           | SSD1306 0.96″ 128×64 OLED, I²C addr 0x3C @ 400 kHz, **SDA=GPIO 8 / SCL=GPIO 9**, rotated 180° |
 | Brew button       | Active-low, HW-debounced (RC + Schmitt) on **GPIO 5**, internal pull-up enabled as fallback |
-| Heater SSR        | _planned_ — GPIO 15 (slow-PWM, 1 s period)                |
-| Pump / valve SSR  | _planned_ — TBD                                           |
+| Steam switch      | Latching mode-select input on **GPIO 4**, active-high, internal pull-down |
+| Heater SSR        | Slow-PWM (1 s period) on **GPIO 47**, active-high        |
+| Pump neutral SSR  | Always-on pump enable on **GPIO 15**, active-high        |
+| Pump PSM triac    | Phase-control gate on **GPIO 17** + mains zero-cross opto on **GPIO 18** (50 Hz / 100 Hz half-cycles) |
+| Valve relay       | 3-way solenoid on **GPIO 16**, active-high               |
 | Pressure sensor   | Honeywell ABP2, I2C addr 0x28 (shared bus SDA=8 / SCL=9) |
-| Load cell (scale) | _planned_ — HX711, TBD                                    |
+| Load cell (scale) | Dual HX711 (data **GPIO 7 / GPIO 10**, shared clock **GPIO 21**); disabled until bench calibration |
 
 Pin allocation rationale: GPIO 0/3/45/46 are strapping; 19/20 = USB-JTAG;
 26-32 = octal PSRAM/flash on N16R8; 33-37 = JTAG. We avoid all of them.
@@ -54,6 +57,7 @@ ESPID-Coffee/
 │   ├── CMakeLists.txt
 │   ├── app_main.cpp              # entry: spawns sensor / display / button tasks
 │   └── config.hpp                # compile-time defaults (namespace espid::config)
+├── main/data/                    # LittleFS web-UI assets (index.html, style.css, app.js)
 ├── components/
 │   ├── hal_cpp/                  # header-only HAL contracts + Result<T>/Status
 │   │   └── include/hal_cpp/
@@ -63,17 +67,25 @@ ESPID-Coffee/
 │   │       ├── i_i2c_bus.hpp
 │   │       ├── i_zacwire_capture.hpp
 │   │       ├── i_display.hpp
+│   │       ├── i_heater.hpp      # slow-PWM SSR HAL contract
 │   │       └── i_network.hpp     # Wi-Fi HAL contract
 │   ├── tsic306/                  # RMT-based ZACwire driver + pure decoder
 │   ├── ssd1306/                  # U8g2-backed IDisplay implementation
 │   ├── wifi/                     # esp_wifi INetwork impl (STA + AP fallback)
 │   ├── pid/                      # header-only discrete PID controller
 │   ├── abp2/                     # ABP2 pressure sensor driver + decoder
+│   ├── heater/                   # slow-PWM SSR IHeater implementation
+│   ├── valve/                    # 3-way solenoid GPIO driver
+│   ├── pump/                     # PSM phase-control pump (ZC ISR) + PsmCore
+│   ├── scale/                    # dual-HX711 driver + ScaleCore (pure logic)
+│   ├── hawkbit/                  # HawkBit DDI OTA client
 │   └── brew/                     # debounced brew button + shot timer (header-only)
 ├── host_tests/                   # GoogleTest harness, ESP-IDF Linux target
 │   ├── CMakeLists.txt
 │   ├── test_tsic306.cpp
 │   ├── test_pid.cpp
+│   ├── test_pump.cpp
+│   ├── test_scale.cpp
 │   └── test_brew.cpp
 └── scripts/
     └── bisect_verify.sh          # walks N commits, runs build+host-tests on each
@@ -165,13 +177,18 @@ Rules:
 | Task          | Core | Priority | Stack  | Period   | Owner                              |
 | ------------- | ---- | -------- | ------ | -------- | ---------------------------------- |
 | `sensor`      |  1   |    5     | 4096 B | event    | TSIC capture + decode → snapshot   |
-| `display`     |  1   |    4     | 4096 B | 200 ms   | OLED render from snapshot          |
-| `button`      |  1   |    3     | 3072 B |  10 ms   | Brew button debounce → shot timer  |
+| `control`     |  1   |    5     | 4096 B | 200 ms   | PID loop → heater; mode-aware setpoint + over-temp guard |
+| `pump`        |  1   |    5     | 4096 B | 200 ms   | Startup fill guard + pressure-PID pump power (PSM via ISR) |
 | `pressure`    |  1   |    4     | 4096 B | 200 ms   | ABP2 polling + pressure snapshot   |
+| `display`     |  1   |    4     | 4096 B | 200 ms   | OLED render from snapshot          |
+| `button`      |  1   |    3     | 3072 B |  10 ms   | Brew button debounce → shot timer + valve |
+| `steam`       |  1   |    3     | 3072 B |  10 ms   | Steam switch debounce → `g_steam_active` |
+| `scale`       |  1   |    3     | 4096 B | 100 ms   | Dual HX711 read → weight (disabled by default) |
+| `mqtt`        |  1   |    2     | 6144 B | event    | Telemetry publish (TLS, optional HA discovery) |
+| `hawkbit`     |  0   |    1     | 8192 B | 5 min    | HawkBit DDI OTA poll               |
 | `heartbeat`   | idle | (main)   |  —     | 5000 ms  | `app_main`, proof-of-life log      |
-| `control`     |   ?  |    ?     |   ?    |  200 ms  | _planned_ — PID loop driving heater|
-| `wifi-evt`    |  0   | esp-wifi | (IDF)  | event    | _planned_ — esp_event task         |
-| `httpd`       |  0   |    5     | 4096 B | event    | _planned_ — esp_http_server worker |
+| `wifi-evt`    |  0   | esp-wifi | (IDF)  | event    | esp_event task (esp_wifi)          |
+| `httpd`       |  0   |    5     | 8192 B | event    | esp_http_server worker (web UI + provisioning) |
 
 All values come from `main/config.hpp`. Treat that file as the only
 place where stack/prio/core/period literals live in firmware code.
@@ -185,12 +202,13 @@ read with `memory_order_relaxed` for the payload after observing a
 release-published `valid` flag. **No queues, no mutexes** for the
 hot path — values are 32-bit naturally aligned on ESP32-S3.
 
-Current snapshots (defined in `main/app_main.cpp`):
+Current shared state (defined in `main/app_main.cpp`):
 
 ```cpp
 struct Snapshot {        // produced by sensor_task
     std::atomic<float>         temp_c;
     std::atomic<std::uint16_t> raw;
+    std::atomic<std::uint64_t> timestamp_ms;
     std::atomic<bool>          valid;   // release/acquire barrier
 };
 
@@ -198,10 +216,26 @@ struct ShotSnapshot {    // produced by button_task
     std::atomic<std::uint32_t> elapsed_ms;
     std::atomic<bool>          running;
 };
+
+struct PressureSnapshot { // produced by pressure_task
+    std::atomic<float>         pressure_bar, pressure_psi, sensor_temp_c;
+    std::atomic<std::uint32_t> pressure_counts;
+    std::atomic<bool>          stale, valid;
+};
+
+struct RuntimeControlSettings { // NVS-shadowed, mutated by web-UI handler
+    std::atomic<float> pid_kp, pid_tn_s, pid_tv_s;
+    std::atomic<float> brew_setpoint_c, steam_setpoint_c, brewing_bias_c;
+    std::atomic<float> pump_kp, pump_ki, pump_kd;
+};
 ```
 
-Planned additions: `HeaterSnapshot { duty_pct, output_on }`,
-`NetSnapshot { state, ip[16] }`.
+Standalone control/coordination flags (all `std::atomic`):
+`g_control_duty_pct`, `g_weight_g`, `g_steam_active` (steam switch →
+control_task setpoint select), `g_emergency_stop` (over-temp latch),
+`g_fill_complete` / `g_fill_ok` (startup-fill handshake gating the
+heater), `g_mqtt_connected`. The shared OLED/ABP2 I2C bus is guarded by
+`g_i2c_bus_mutex` (a real mutex — the only lock in the design).
 
 ---
 
@@ -242,11 +276,20 @@ stateDiagram-v2
     Splash --> Idle: 2 s elapsed
     Idle --> Brewing: brew button pressed (timer.start)
     Brewing --> Idle: brew button pressed (timer.stop)
+    Idle --> Steam: steam switch on
+    Steam --> Idle: steam switch off
 
     note right of Splash : "ESPID-Coffee"<br/>"v0.0.4"
-    note right of Idle : Big temperature<br/>Small shot footer (0.0 s)<br/>Wi-Fi badge in header
-    note right of Brewing : Big shot timer<br/>Small temperature footer<br/>Wi-Fi badge in header
+    note right of Idle : Big temperature<br/>Footer: shot time + "SP:" brew setpoint<br/>Wi-Fi badge in header
+    note right of Brewing : Big shot timer<br/>Footer: pressure + temperature<br/>Wi-Fi badge in header
+    note right of Steam : Big temperature<br/>Footer: "STEAM" + "ST:" steam setpoint
 ```
+
+Steam is a footer/label overlay on the Idle screen, not a separate
+full-screen state: while `g_steam_active` is set the footer shows
+`STEAM` and the steam setpoint (`ST:`) instead of the shot time and
+brew setpoint (`SP:`). The brewing screen still takes precedence if a
+shot is pulled.
 
 ---
 
@@ -269,12 +312,14 @@ an `ESP_LOGE` + busy-loop (e.g. TSIC driver).
 [`main/config.hpp`](main/config.hpp) is the **single boot-time
 configuration namespace** (`espid::config::*`). Everything is
 `constexpr` — no macros, no globals. Sections in current use: `tsic`,
-`oled`, `brew`. Stubs ready to be wired: `pid`, `heater`, `net`,
-`mqtt`.
+`oled`, `brew`, `steam`, `pid`, `heater`, `valve`, `pump`, `pressure`,
+`net`, `mqtt`, `hawkbit`. `scale` is wired but gated off
+(`scale::kEnabled == false`) until bench calibration.
 
-When the embedded web UI lands, runtime-mutable values will be
-shadowed from NVS in a separate `settings` component; `config::`
-remains the compile-time fallback.
+Runtime-mutable parameters (PID gains, brew/steam setpoints, pump PID
+gains, brewing bias, Wi-Fi credentials, MQTT endpoint, HawkBit
+server/token) are shadowed from NVS at boot and overridden live by the
+embedded web UI; `config::` remains the compile-time fallback.
 
 ---
 
@@ -326,19 +371,20 @@ If `get_idf` alias is unavailable in your shell:
 | 2f    | Boot splash                          | ✅ done  | `074797b` |
 | 3a    | **`INetwork` HAL contract**          | ✅ done  | `ede75a0` |
 | 3b    | Wi-Fi STA + AP-fallback impl         | ✅ done  | `d8a3191` |
-| 3c    | Captive-portal credential capture    | ⏳ planned |     |
-| 3d    | `app_main` wiring + OLED Wi-Fi glyph | 🚧 active | this commit |
-| 4a    | `IHeater` HAL + slow-PWM SSR driver  | ✅ done    | this commit |
-| 4b    | `control_task` running `pid::Controller` | ⏳ planned |  |
-| 5a    | Embedded web UI scaffold (`esp_http_server` + static assets) | ⏳ planned | |
-| 5b    | `/api/status`, `/api/config` JSON    | ⏳ planned |     |
-| 6     | `settings` component (NVS-backed)    | ⏳ planned |     |
-| 7     | MQTT bridge (optional, Home Assistant Auto Discovery) | ⏳ planned | |
-| 8     | Pump PSM / valve control             | ⏳ planned |     |
-| 9     | HX711 scale integration              | ⏳ planned |     |
-| 10    | Safety watchdog + A/B OTA            | ⏳ planned |     |
+| 3c    | Web-form credential capture (AP fallback → NVS) | ✅ done | |
+| 3d    | `app_main` wiring + OLED Wi-Fi glyph | ✅ done  |     |
+| 4a    | `IHeater` HAL + slow-PWM SSR driver  | ✅ done  | |
+| 4b    | `control_task` running `pid::Controller` | ✅ done | mode-aware setpoint + over-temp guard |
+| 4c    | **Steam mode** (switch → setpoint, steam over-temp guard, OLED label) | ✅ done | this change |
+| 5a    | Embedded web UI (LittleFS static assets + `esp_http_server`) | ✅ done | |
+| 5b    | `/api/status` + config/provisioning form handlers | ✅ done |     |
+| 6     | NVS-backed runtime settings (PID, setpoints, pump, MQTT) | ✅ done | `app_cfg` namespace |
+| 7     | MQTT bridge (TLS, optional Home Assistant discovery) | ✅ done | |
+| 8     | Pump PSM (triac + ZC ISR) + 3-way valve control | ✅ done | fill guard + pressure PID |
+| 9     | Dual-HX711 scale (driver + `ScaleCore`) | 🚧 driver done | disabled pending calibration |
+| 10    | Safety over-temp latch + HawkBit A/B OTA | 🚧 partial | emergency-stop + DDI poll live; watchdog TBD |
 
-Explicitly deferred: TLS, pressure sensor, Bluetooth.
+Explicitly deferred: TLS for the local web UI, Bluetooth.
 
 ---
 
