@@ -58,12 +58,13 @@ void set_auth(esp_http_client_handle_t c, const char* token) noexcept {
 
 // Perform a GET and read the response body into |buf| (NUL-terminated).
 // Returns HTTP status code, or <0 on transport error.
+// Uses the manual open/fetch_headers/read/close flow — perform() discards
+// the body when no event_handler is registered.
 int http_get(const char* url, const char* token,
              char* buf, std::size_t buf_size) noexcept {
     esp_http_client_config_t cfg{};
-    cfg.url                = url;
-    cfg.crt_bundle_attach  = esp_crt_bundle_attach;
-    cfg.disable_auto_redirect = false;
+    cfg.url               = url;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
@@ -72,15 +73,25 @@ int http_get(const char* url, const char* token,
     set_auth(client, token);
 
     buf[0] = '\0';
-    const esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        esp_http_client_read_response(client, buf, static_cast<int>(buf_size) - 1);
-        buf[buf_size - 1] = '\0';
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "http_get open: %d", static_cast<int>(err));
+        esp_http_client_cleanup(client);
+        return -1;
     }
 
+    esp_http_client_fetch_headers(client);
     const int status = esp_http_client_get_status_code(client);
+
+    if (status == 200) {
+        const int rd = esp_http_client_read_response(
+            client, buf, static_cast<int>(buf_size) - 1);
+        buf[rd > 0 ? rd : 0] = '\0';
+    }
+
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return (err == ESP_OK) ? status : -1;
+    return status;
 }
 
 // POST a JSON body; returns HTTP status code or <0 on error.
