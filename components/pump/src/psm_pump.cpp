@@ -3,6 +3,7 @@
 #include "pump/psm_pump.hpp"
 
 #include "driver/gpio.h"
+#include "esp_cpu.h"
 #include "esp_err.h"
 #include "esp_rom_sys.h"
 
@@ -117,6 +118,18 @@ hal_cpp::Status PsmPump::set_power_pct(float power_pct) noexcept {
 
 void IRAM_ATTR PsmPump::zero_cross_isr_(void* arg) {
     auto* self = static_cast<PsmPump*>(arg);
+
+    // Debounce: reject edges arriving < 8 ms after the last accepted one.
+    // Real 50 Hz mains produce edges every ~10 ms; opto noise can generate
+    // thousands per second which prevent the gate timer from ever firing.
+    const std::uint32_t now = esp_cpu_get_cycle_count();
+    const std::uint32_t last = self->last_valid_zc_cycles_.load(std::memory_order_relaxed);
+    // 8 ms at 160 MHz = 1,280,000 cycles. Unsigned subtraction handles wraparound.
+    constexpr std::uint32_t kMinIntervalCycles = 160'000'000U / 1000U * 8U;
+    if ((now - last) < kMinIntervalCycles) {
+        return;
+    }
+    self->last_valid_zc_cycles_.store(now, std::memory_order_relaxed);
     self->zc_count_.fetch_add(1, std::memory_order_relaxed);
     if (!self->firing_enabled_.load(std::memory_order_acquire)) {
         return;

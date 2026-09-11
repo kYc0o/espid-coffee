@@ -62,6 +62,8 @@ class PsmPump {
     PsmCore                    core_{};
     gptimer_handle_t           gate_timer_{nullptr};
     std::atomic<std::uint32_t> zc_count_{0};
+    // Cycle count of the last accepted ZC edge; used to debounce opto noise.
+    std::atomic<std::uint32_t> last_valid_zc_cycles_{0};
     std::atomic<std::uint32_t> firing_delay_us_{0};
     std::atomic<bool>          firing_enabled_{false};
     int                        gate_active_level_{1};

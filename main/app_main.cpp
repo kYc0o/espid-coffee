@@ -1964,6 +1964,7 @@ void pump_task(void* arg) {
 
     std::uint32_t log_div = 0;
     bool was_brewing = false;
+    std::uint32_t last_zc = 0;
     for (;;) {
         const bool brewing = g_shot.running.load(std::memory_order_relaxed);
         if (brewing) {
@@ -1973,6 +1974,7 @@ void pump_task(void* arg) {
                 pcfg.ki = g_runtime_control.pump_ki.load(std::memory_order_relaxed);
                 pcfg.kd = g_runtime_control.pump_kd.load(std::memory_order_relaxed);
                 pid.set_config(pcfg);
+                last_zc = ctx->psm->zc_count();
             }
             was_brewing = true;
             if (g_pressure.valid.load(std::memory_order_acquire)) {
@@ -1980,8 +1982,12 @@ void pump_task(void* arg) {
                 const float power = pid.update(cfg::pump::kPressureSetpointBar, p);
                 (void)ctx->psm->set_power_pct(power);
                 if ((++log_div % 10U) == 0U) {
-                    ESP_LOGI(kTag, "pump: p=%.2fbar power=%.1f%%",
-                             static_cast<double>(p), static_cast<double>(power));
+                    const std::uint32_t zc_now = ctx->psm->zc_count();
+                    // ZC delta over 10 samples (1 s): expect ~100 for healthy 50 Hz.
+                    ESP_LOGI(kTag, "pump: p=%.2fbar power=%.1f%% zc/s=%u",
+                             static_cast<double>(p), static_cast<double>(power),
+                             static_cast<unsigned>(zc_now - last_zc));
+                    last_zc = zc_now;
                 }
             } else {
                 // No pressure reading yet — run at full power as fallback.
