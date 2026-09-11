@@ -1926,6 +1926,7 @@ void pump_task(void* arg) {
     const std::uint64_t fill_deadline_ms =
         static_cast<std::uint64_t>(esp_timer_get_time() / 1000) +
         cfg::pump::kStartupFillTimeoutMs;
+    const std::uint32_t zc_at_fill_start = ctx->psm->zc_count();
     bool fill_ok = false;
     for (;;) {
         const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
@@ -1935,7 +1936,18 @@ void pump_task(void* arg) {
             break;
         }
         if (static_cast<std::uint64_t>(esp_timer_get_time() / 1000) >= fill_deadline_ms) {
-            ESP_LOGW(kTag, "pump: fill timeout - boiler may be empty; heater stays OFF");
+            // Pressure sensor is on the group-head side of the valve; it reads 0
+            // while the valve is closed even if the pump ran successfully.
+            // Accept fill as OK if the pump demonstrably ran (ZC confirms it).
+            const std::uint32_t zc_delta = ctx->psm->zc_count() - zc_at_fill_start;
+            if (zc_delta >= cfg::pump::kStartupFillMinZcCount) {
+                fill_ok = true;
+                ESP_LOGW(kTag, "pump: fill timeout but pump ran (zc_delta=%u) — accepting",
+                         static_cast<unsigned>(zc_delta));
+            } else {
+                ESP_LOGW(kTag, "pump: fill timeout and pump barely ran (zc_delta=%u) — check water",
+                         static_cast<unsigned>(zc_delta));
+            }
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(200));

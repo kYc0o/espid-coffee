@@ -200,6 +200,9 @@ constexpr float         kPowerMaxPct         = 100.0F;
 constexpr float          kStartupFillThresholdBar = 1.0F;
 constexpr std::uint32_t  kStartupFillTimeoutMs    = 120'000;  // empty boiler takes a while
 constexpr float          kStartupFillPowerPct     = 100.0F;
+// Minimum ZC edges during fill that confirm the pump was actually running.
+// At 100/s (50 Hz both-edge), 60 s of pumping = 6000 edges.
+constexpr std::uint32_t  kStartupFillMinZcCount   = 3000;  // 30 s minimum
 
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
 // Starting-point gains for a vibratory pump (tune upward from here):
