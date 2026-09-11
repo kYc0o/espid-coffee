@@ -130,6 +130,12 @@ constexpr float         kSetpointC      = 92.0F;
 constexpr float         kSteamSetpointC = 130.0F;
 constexpr float         kEmergencyStopTempC = 120.0F;
 constexpr float         kEmergencyResetTempC = 100.0F;
+// Steam mode targets a much higher boiler temperature, so the brew-mode
+// over-temp guard would trip before the steam setpoint is reached. These
+// thresholds apply while the steam switch is engaged; keep steam setpoints
+// comfortably below kSteamEmergencyStopTempC for overshoot headroom.
+constexpr float         kSteamEmergencyStopTempC  = 165.0F;
+constexpr float         kSteamEmergencyResetTempC = 145.0F;
 constexpr float         kKp             = 30.0F;
 constexpr float         kKi             = 0.4F;
 constexpr float         kKd             = 60.0F;

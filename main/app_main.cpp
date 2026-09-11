@@ -1707,20 +1707,31 @@ void control_task(void* arg) {
             valid && sample_ms > 0U && now_ms >= sample_ms &&
             (now_ms - sample_ms) <= freshness_budget_ms;
 
-        if (sample_fresh && temp_c >= cfg::pid::kEmergencyStopTempC) {
+        // Steam mode heats the boiler far past the brew over-temp ceiling, so
+        // the emergency thresholds must track the active mode.
+        const bool steam_active =
+            g_steam_active.load(std::memory_order_relaxed);
+        const float emergency_stop_c = steam_active
+            ? cfg::pid::kSteamEmergencyStopTempC
+            : cfg::pid::kEmergencyStopTempC;
+        const float emergency_reset_c = steam_active
+            ? cfg::pid::kSteamEmergencyResetTempC
+            : cfg::pid::kEmergencyResetTempC;
+
+        if (sample_fresh && temp_c >= emergency_stop_c) {
             const bool was_stopped = g_emergency_stop.exchange(true, std::memory_order_relaxed);
             if (!was_stopped) {
                 ESP_LOGE(kTag, "EMERGENCY STOP: temp %.2fC >= %.2fC",
                          static_cast<double>(temp_c),
-                         static_cast<double>(cfg::pid::kEmergencyStopTempC));
+                         static_cast<double>(emergency_stop_c));
             }
         } else if (g_emergency_stop.load(std::memory_order_relaxed) &&
                    sample_fresh &&
-                   temp_c <= cfg::pid::kEmergencyResetTempC) {
+                   temp_c <= emergency_reset_c) {
             g_emergency_stop.store(false, std::memory_order_relaxed);
             ESP_LOGW(kTag, "Emergency stop reset: temp %.2fC <= %.2fC",
                      static_cast<double>(temp_c),
-                     static_cast<double>(cfg::pid::kEmergencyResetTempC));
+                     static_cast<double>(emergency_reset_c));
         }
         const bool emergency_stop = g_emergency_stop.load(std::memory_order_relaxed);
 
@@ -1729,8 +1740,6 @@ void control_task(void* arg) {
         const float pid_tv_s = g_runtime_control.pid_tv_s.load(std::memory_order_relaxed);
         const float brew_setpoint_c =
             g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
-        const bool steam_active =
-            g_steam_active.load(std::memory_order_relaxed);
         const float steam_setpoint_c =
             g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed);
         const float active_setpoint_c =
@@ -1778,8 +1787,10 @@ void control_task(void* arg) {
         g_control_duty_pct.store(duty_pct, std::memory_order_relaxed);
 
         if ((++log_div % 10U) == 0U) {
-            ESP_LOGI(kTag, "control: duty=%.1f%% fresh=%d estop=%d serr=%" PRIu32,
+            ESP_LOGI(kTag, "control: duty=%.1f%% sp=%.1fC steam=%d fresh=%d estop=%d serr=%" PRIu32,
                      static_cast<double>(duty_pct),
+                     static_cast<double>(active_setpoint_c),
+                     steam_active ? 1 : 0,
                      sample_fresh ? 1 : 0,
                      emergency_stop ? 1 : 0,
                      g_sensor_consecutive_errors.load(std::memory_order_relaxed));
@@ -1822,6 +1833,10 @@ void display_task(void* arg) {
             g_pressure.stale.load(std::memory_order_relaxed);
         const float brew_setpoint_c =
             g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
+        const bool steam_active =
+            g_steam_active.load(std::memory_order_relaxed);
+        const float steam_setpoint_c =
+            g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed);
         espid::hal_cpp::WifiState wifi_state =
             espid::hal_cpp::WifiState::kIdle;
         espid::hal_cpp::INetwork::IpString wifi_ip{};
@@ -1850,11 +1865,13 @@ void display_task(void* arg) {
         }
 
         char setpoint_str[16];
-        if (std::isfinite(brew_setpoint_c)) {
-            std::snprintf(setpoint_str, sizeof(setpoint_str), "SP:%4.1f",
-                          static_cast<double>(brew_setpoint_c));
+        const float shown_setpoint_c = steam_active ? steam_setpoint_c : brew_setpoint_c;
+        const char* setpoint_prefix   = steam_active ? "ST" : "SP";
+        if (std::isfinite(shown_setpoint_c)) {
+            std::snprintf(setpoint_str, sizeof(setpoint_str), "%s:%4.1f",
+                          setpoint_prefix, static_cast<double>(shown_setpoint_c));
         } else {
-            std::snprintf(setpoint_str, sizeof(setpoint_str), "SP:--.-");
+            std::snprintf(setpoint_str, sizeof(setpoint_str), "%s:--.-", setpoint_prefix);
         }
 
         display->clear();
@@ -1889,8 +1906,12 @@ void display_task(void* arg) {
             display->draw_text(0,  60, espid::hal_cpp::Font::kSmall, footer);
         } else {
             // Idle: big temperature, footer with shot + setpoint.
-            std::snprintf(small, sizeof(small), "shot %4.1fs",
-                          static_cast<double>(shot_ms) / 1000.0);
+            if (steam_active) {
+                std::snprintf(small, sizeof(small), "STEAM");
+            } else {
+                std::snprintf(small, sizeof(small), "shot %4.1fs",
+                              static_cast<double>(shot_ms) / 1000.0);
+            }
             std::snprintf(footer, sizeof(footer), "%s %sC", small, setpoint_str);
             display->draw_text(8,  44, espid::hal_cpp::Font::kLarge, temp_str);
             display->draw_text(110, 28, espid::hal_cpp::Font::kSmall, "C");
