@@ -44,8 +44,8 @@ this file is the human-facing companion for bench and in-machine work.
 | Heater **SSR** | `GPIO47` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
 | Brew switch | `GPIO5` | in | internal pull-**down** | Switch sources 3V3 when closed → active-high. |
 | Steam switch | `GPIO4` | in | internal pull-**down** | Switch to 3V3; `kPulldownEnable = true`. |
-| Valve relay (3-way) | `GPIO16` | out | none | Isolated relay module. |
-| Pump **SSR** (always-on) | `GPIO15` | out | none | Driven HIGH at boot; PSM triac controls actual power. |
+| Valve / 3-way solenoid (+ completes pump AC circuit) | `GPIO16` | out | none | Open during brew AND during startup fill. |
+| Pump **neutral SSR** | `GPIO15` | out | none | Driven HIGH at boot; completes the pump AC neutral path. |
 | Pump **PSM** triac gate | `GPIO17` | out | none | To dimmer/triac gate. |
 | Pump **zero-cross** input | `GPIO18` | in | **10 kΩ → 3V3** (or internal pull-up) | Opto ZC, ~100 Hz pulses at 50 Hz mains. |
 | Scale HX711 #1 **DOUT** | `GPIO7` | in | none | HX711 drives push-pull. |
@@ -53,7 +53,7 @@ this file is the human-facing companion for bench and in-machine work.
 | Scale HX711 **SCK** (shared) | `GPIO21` | out | none | Common clock to both HX711. |
 
 Free for future use: `GPIO2`, `GPIO6`, `GPIO11`, `GPIO12`, `GPIO13`,
-`GPIO14`, `GPIO39`, `GPIO40`, `GPIO41`, `GPIO42`, `GPIO47`.
+`GPIO14`, `GPIO39`, `GPIO40`, `GPIO41`, `GPIO42`.
 
 Deferred (not wired yet): hot-water switch, water-tank level sensor,
 rotary encoder, status/brew LED, flow meter, power switch, E-trigger.
@@ -77,7 +77,7 @@ rotary encoder, status/brew LED, flow meter, power switch, E-trigger.
 | Signal | What to fit | Why |
 |---|---|---|
 | I²C SDA, SCL | 4.7 kΩ to **3V3** each | Bus idle-high; internal pulls too weak. |
-| Heater SSR (`GPIO15`) | 10 kΩ to **GND** | Guarantee heater OFF while the S3 boots (pin is Hi-Z). |
+| Heater SSR (`GPIO47`) | 10 kΩ to **GND** | Guarantee heater OFF while the S3 boots (pin is Hi-Z). |
 | Steam switch (`GPIO4`) | internal pull-**down** | Switch sources 3V3 when closed → hold low when open. |
 | Pump zero-cross (`GPIO18`) | pull-**up** (internal ok, 10 kΩ ext. for noise) | Opto output is open-collector. |
 | Brew switch (`GPIO5`) | internal pull-**up** | Config uses active-low to GND. |

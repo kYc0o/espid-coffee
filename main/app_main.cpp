@@ -43,6 +43,7 @@
 #include "tsic306/tsic306_driver.hpp"
 #include "valve/solenoid_valve.hpp"
 #include "wifi/esp_wifi_network.hpp"
+#include "esp_wifi.h"
 
 namespace {
 
@@ -1768,7 +1769,8 @@ void display_task(void* arg) {
 
 // Pump task: startup fill then pressure-PID-controlled pump power during brew.
 struct PumpTaskCtx {
-    espid::pump::PsmPump* psm;
+    espid::pump::PsmPump*       psm;
+    espid::valve::SolenoidValve* valve;  // must open during fill to complete pump AC circuit
 };
 
 void pump_task(void* arg) {
@@ -1786,6 +1788,10 @@ void pump_task(void* arg) {
              static_cast<unsigned>(cfg::pump::kStartupFillTimeoutMs / 1000U));
 
     (void)ctx->psm->set_power_pct(cfg::pump::kStartupFillPowerPct);
+    // Open the solenoid/neutral relay so the pump AC circuit is complete.
+    if (ctx->valve != nullptr) {
+        (void)ctx->valve->open();
+    }
     const std::uint64_t fill_deadline_ms =
         static_cast<std::uint64_t>(esp_timer_get_time() / 1000) +
         cfg::pump::kStartupFillTimeoutMs;
@@ -1804,6 +1810,10 @@ void pump_task(void* arg) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     (void)ctx->psm->set_power_pct(0.0F);
+    // Close the solenoid after fill so the group head doesn't drip.
+    if (ctx->valve != nullptr) {
+        (void)ctx->valve->close();
+    }
     g_fill_ok.store(fill_ok, std::memory_order_release);
     g_fill_complete.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "pump: %s", fill_ok ? "ready for brewing" : "fill FAILED");
@@ -2085,6 +2095,8 @@ extern "C" void app_main(void) {
         static espid::valve::SolenoidValve pump_ssr;
         if (pump_ssr.init(ssr_cfg).ok()) {
             (void)pump_ssr.open();
+            // Hold the pin HIGH across any sleep; PSM triac controls actual power.
+            (void)gpio_hold_en(static_cast<gpio_num_t>(ssr_cfg.gpio));
             ESP_LOGI(kTag, "pump SSR always-on on gpio=%d", ssr_cfg.gpio);
         }
 
@@ -2213,6 +2225,8 @@ extern "C" void app_main(void) {
                     ESP_LOGI(kTag, "Wi-Fi ready (%s, ip=%s)",
                              espid::hal_cpp::to_string(wifi_state),
                              wifi_ip.data());
+                    // Disable power-save so all GPIO outputs stay driven.
+                    esp_wifi_set_ps(WIFI_PS_NONE);
                     break;
                 }
                 vTaskDelay(pdMS_TO_TICKS(200));
@@ -2253,7 +2267,8 @@ extern "C" void app_main(void) {
     }
 
     if (cfg::pump::kEnabled) {
-        static PumpTaskCtx pump_ctx{&pump};
+        static PumpTaskCtx pump_ctx{&pump,
+                                    valve_ready ? &valve : nullptr};
         ok = xTaskCreatePinnedToCore(
             &pump_task, "pump", cfg::pump::kTaskStackBytes, &pump_ctx,
             cfg::pump::kTaskPriority, nullptr, cfg::pump::kTaskCore);

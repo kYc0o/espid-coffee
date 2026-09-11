@@ -117,6 +117,7 @@ hal_cpp::Status PsmPump::set_power_pct(float power_pct) noexcept {
 
 void IRAM_ATTR PsmPump::zero_cross_isr_(void* arg) {
     auto* self = static_cast<PsmPump*>(arg);
+    self->zc_count_.fetch_add(1, std::memory_order_relaxed);
     if (!self->firing_enabled_.load(std::memory_order_acquire)) {
         return;
     }

@@ -46,6 +46,11 @@ class PsmPump {
 
     float power_pct() const noexcept { return core_.power_pct(); }
 
+    // Diagnostic: total zero-cross edges received since init.
+    std::uint32_t zc_count() const noexcept {
+        return zc_count_.load(std::memory_order_relaxed);
+    }
+
    private:
     static void zero_cross_isr_(void* arg);
     static bool gate_alarm_cb_(gptimer_handle_t timer,
@@ -56,6 +61,7 @@ class PsmPump {
     Config                     cfg_{};
     PsmCore                    core_{};
     gptimer_handle_t           gate_timer_{nullptr};
+    std::atomic<std::uint32_t> zc_count_{0};
     std::atomic<std::uint32_t> firing_delay_us_{0};
     std::atomic<bool>          firing_enabled_{false};
     int                        gate_active_level_{1};
