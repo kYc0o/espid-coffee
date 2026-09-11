@@ -1788,10 +1788,8 @@ void pump_task(void* arg) {
              static_cast<unsigned>(cfg::pump::kStartupFillTimeoutMs / 1000U));
 
     (void)ctx->psm->set_power_pct(cfg::pump::kStartupFillPowerPct);
-    // Open the solenoid/neutral relay so the pump AC circuit is complete.
-    if (ctx->valve != nullptr) {
-        (void)ctx->valve->open();
-    }
+    // Valve stays CLOSED during fill: pump pushes into boiler via check valve.
+    // Opening the solenoid routes water to group head and prevents pressure build.
     const std::uint64_t fill_deadline_ms =
         static_cast<std::uint64_t>(esp_timer_get_time() / 1000) +
         cfg::pump::kStartupFillTimeoutMs;
@@ -1810,10 +1808,7 @@ void pump_task(void* arg) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     (void)ctx->psm->set_power_pct(0.0F);
-    // Close the solenoid after fill so the group head doesn't drip.
-    if (ctx->valve != nullptr) {
-        (void)ctx->valve->close();
-    }
+    ESP_LOGI(kTag, "pump: fill end — zc_count=%u", ctx->psm->zc_count());
     g_fill_ok.store(fill_ok, std::memory_order_release);
     g_fill_complete.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "pump: %s", fill_ok ? "ready for brewing" : "fill FAILED");
