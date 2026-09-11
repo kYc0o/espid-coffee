@@ -13,9 +13,11 @@
   // --- Pre-populate form fields from /api/settings ---
   var FIELDS = [
     'pid_kp', 'pid_tn', 'pid_tv',
+    'pump_kp', 'pump_ki', 'pump_kd',
     'brew_sp', 'steam_sp',
     'brew_t', 'preinf_t', 'preinf_pause_t',
-    'mqtt_host', 'mqtt_port'
+    'mqtt_host', 'mqtt_port',
+    'mqtt_user', 'mqtt_pass', 'mqtt_client'
   ];
 
   fetch('/api/settings')

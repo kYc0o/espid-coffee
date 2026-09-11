@@ -201,6 +201,9 @@ constexpr const char* kCfgNvsNamespace = "app_cfg";
 constexpr const char* kCfgPidKp = "pid_kp";
 constexpr const char* kCfgPidTn = "pid_tn";
 constexpr const char* kCfgPidTv = "pid_tv";
+constexpr const char* kCfgPumpKp = "pump_kp";
+constexpr const char* kCfgPumpKi = "pump_ki";
+constexpr const char* kCfgPumpKd = "pump_kd";
 constexpr const char* kCfgBrewSetpoint = "brew_sp";
 constexpr const char* kCfgSteamSetpoint = "steam_sp";
 constexpr const char* kCfgBrewTime = "brew_t";
@@ -229,6 +232,9 @@ struct RuntimeControlSettings {
     std::atomic<float> pid_tv_s{default_pid_tv_seconds()};
     std::atomic<float> brew_setpoint_c{cfg::pid::kSetpointC};
     std::atomic<float> steam_setpoint_c{cfg::pid::kSteamSetpointC};
+    std::atomic<float> pump_kp{cfg::pump::kPidKp};
+    std::atomic<float> pump_ki{cfg::pump::kPidKi};
+    std::atomic<float> pump_kd{cfg::pump::kPidKd};
 };
 
 RuntimeControlSettings g_runtime_control;
@@ -501,12 +507,18 @@ void publish_runtime_control_settings(float pid_kp,
                                       float pid_tn_s,
                                       float pid_tv_s,
                                       float brew_setpoint_c,
-                                      float steam_setpoint_c) noexcept {
+                                      float steam_setpoint_c,
+                                      float pump_kp,
+                                      float pump_ki,
+                                      float pump_kd) noexcept {
     g_runtime_control.pid_kp.store(pid_kp, std::memory_order_relaxed);
     g_runtime_control.pid_tn_s.store(pid_tn_s, std::memory_order_relaxed);
     g_runtime_control.pid_tv_s.store(pid_tv_s, std::memory_order_relaxed);
     g_runtime_control.brew_setpoint_c.store(brew_setpoint_c, std::memory_order_relaxed);
     g_runtime_control.steam_setpoint_c.store(steam_setpoint_c, std::memory_order_relaxed);
+    g_runtime_control.pump_kp.store(pump_kp, std::memory_order_relaxed);
+    g_runtime_control.pump_ki.store(pump_ki, std::memory_order_relaxed);
+    g_runtime_control.pump_kd.store(pump_kd, std::memory_order_relaxed);
 }
 
 bool save_sta_credentials_to_nvs(const char* ssid, const char* password) noexcept {
@@ -614,6 +626,9 @@ void load_runtime_control_settings_from_nvs() noexcept {
     float pid_tv = default_pid_tv_seconds();
     float brew_sp = cfg::pid::kSetpointC;
     float steam_sp = cfg::pid::kSteamSetpointC;
+    float pump_kp = cfg::pump::kPidKp;
+    float pump_ki = cfg::pump::kPidKi;
+    float pump_kd = cfg::pump::kPidKd;
 
     char value[32];
     if (load_setting_from_nvs(kCfgPidKp, nullptr, value, sizeof(value))) {
@@ -626,19 +641,23 @@ void load_runtime_control_settings_from_nvs() noexcept {
         (void)parse_float_in_range(value, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &pid_tv);
     }
     if (load_setting_from_nvs(kCfgBrewSetpoint, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value,
-                                   cfg::pid::kSetpointMinC,
-                                   cfg::pid::kSetpointMaxC,
-                                   &brew_sp);
+        (void)parse_float_in_range(value, cfg::pid::kSetpointMinC, cfg::pid::kSetpointMaxC, &brew_sp);
     }
     if (load_setting_from_nvs(kCfgSteamSetpoint, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value,
-                                   cfg::pid::kSteamSetpointMinC,
-                                   cfg::pid::kSteamSetpointMaxC,
-                                   &steam_sp);
+        (void)parse_float_in_range(value, cfg::pid::kSteamSetpointMinC, cfg::pid::kSteamSetpointMaxC, &steam_sp);
+    }
+    if (load_setting_from_nvs(kCfgPumpKp, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value, 0.0F, 100.0F, &pump_kp);
+    }
+    if (load_setting_from_nvs(kCfgPumpKi, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value, 0.0F, 10.0F, &pump_ki);
+    }
+    if (load_setting_from_nvs(kCfgPumpKd, nullptr, value, sizeof(value))) {
+        (void)parse_float_in_range(value, 0.0F, 50.0F, &pump_kd);
     }
 
-    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp);
+    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp,
+                                     pump_kp, pump_ki, pump_kd);
 }
 
 void restart_task(void* /*arg*/) {
@@ -688,6 +707,9 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     char pid_tv[16];
     char brew_sp[16];
     char steam_sp[16];
+    char pump_kp[16];
+    char pump_ki[16];
+    char pump_kd[16];
     char brew_t[16];
     char preinf_t[16];
     char preinf_pause_t[16];
@@ -705,6 +727,9 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     char pid_kp_default[16];
     char pid_tn_default_str[16];
     char pid_tv_default_str[16];
+    char pump_kp_default[16];
+    char pump_ki_default[16];
+    char pump_kd_default[16];
     char brew_sp_default[16];
     char steam_sp_default[16];
     char brew_t_default[16];
@@ -718,6 +743,12 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
                   static_cast<double>(pid_tn_default));
     std::snprintf(pid_tv_default_str, sizeof(pid_tv_default_str), "%.2f",
                   static_cast<double>(pid_tv_default));
+    std::snprintf(pump_kp_default, sizeof(pump_kp_default), "%.3f",
+                  static_cast<double>(cfg::pump::kPidKp));
+    std::snprintf(pump_ki_default, sizeof(pump_ki_default), "%.3f",
+                  static_cast<double>(cfg::pump::kPidKi));
+    std::snprintf(pump_kd_default, sizeof(pump_kd_default), "%.3f",
+                  static_cast<double>(cfg::pump::kPidKd));
     std::snprintf(brew_sp_default, sizeof(brew_sp_default), "%.2f",
                   static_cast<double>(cfg::pid::kSetpointC));
     std::snprintf(steam_sp_default, sizeof(steam_sp_default), "%.2f",
@@ -734,6 +765,9 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     (void)load_setting_from_nvs(kCfgPidKp, pid_kp_default, pid_kp, sizeof(pid_kp));
     (void)load_setting_from_nvs(kCfgPidTn, pid_tn_default_str, pid_tn, sizeof(pid_tn));
     (void)load_setting_from_nvs(kCfgPidTv, pid_tv_default_str, pid_tv, sizeof(pid_tv));
+    (void)load_setting_from_nvs(kCfgPumpKp, pump_kp_default, pump_kp, sizeof(pump_kp));
+    (void)load_setting_from_nvs(kCfgPumpKi, pump_ki_default, pump_ki, sizeof(pump_ki));
+    (void)load_setting_from_nvs(kCfgPumpKd, pump_kd_default, pump_kd, sizeof(pump_kd));
     (void)load_setting_from_nvs(kCfgBrewSetpoint, brew_sp_default, brew_sp, sizeof(brew_sp));
     (void)load_setting_from_nvs(kCfgSteamSetpoint, steam_sp_default, steam_sp, sizeof(steam_sp));
     (void)load_setting_from_nvs(kCfgBrewTime, brew_t_default, brew_t, sizeof(brew_t));
@@ -751,10 +785,11 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     (void)load_setting_from_nvs(kCfgMqttClientId, cfg::mqtt::kClientId,
                                 mqtt_client, sizeof(mqtt_client));
 
-    char json[768];
+    char json[896];
     const int n = std::snprintf(json, sizeof(json),
         "{\"ap_ssid\":\"%s\",\"wifi_ssid\":\"%s\","
         "\"pid_kp\":\"%s\",\"pid_tn\":\"%s\",\"pid_tv\":\"%s\","
+        "\"pump_kp\":\"%s\",\"pump_ki\":\"%s\",\"pump_kd\":\"%s\","
         "\"brew_sp\":\"%s\",\"steam_sp\":\"%s\","
         "\"brew_t\":\"%s\",\"preinf_t\":\"%s\",\"preinf_pause_t\":\"%s\","
         "\"mqtt_host\":\"%s\",\"mqtt_port\":\"%s\","
@@ -762,6 +797,7 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
         configured_ap_ssid(),
         g_saved_sta_ssid,
         pid_kp, pid_tn, pid_tv,
+        pump_kp, pump_ki, pump_kd,
         brew_sp, steam_sp,
         brew_t, preinf_t, preinf_pause_t,
         mqtt_host, mqtt_port, mqtt_user, mqtt_pass, mqtt_client);
@@ -886,6 +922,9 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     char pid_kp_txt[16]{};
     char pid_tn_txt[16]{};
     char pid_tv_txt[16]{};
+    char pump_kp_txt[16]{};
+    char pump_ki_txt[16]{};
+    char pump_kd_txt[16]{};
     char brew_sp_txt[16]{};
     char steam_sp_txt[16]{};
     char brew_t_txt[16]{};
@@ -905,6 +944,15 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     }
     if (!form_field(body, "pid_tv", pid_tv_txt, sizeof(pid_tv_txt))) {
         return reject_bad_request("Missing pid_tv");
+    }
+    if (!form_field(body, "pump_kp", pump_kp_txt, sizeof(pump_kp_txt))) {
+        return reject_bad_request("Missing pump_kp");
+    }
+    if (!form_field(body, "pump_ki", pump_ki_txt, sizeof(pump_ki_txt))) {
+        return reject_bad_request("Missing pump_ki");
+    }
+    if (!form_field(body, "pump_kd", pump_kd_txt, sizeof(pump_kd_txt))) {
+        return reject_bad_request("Missing pump_kd");
     }
     if (!form_field(body, "brew_sp", brew_sp_txt, sizeof(brew_sp_txt))) {
         return reject_bad_request("Missing brew_sp");
@@ -944,6 +992,9 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     float pid_kp = 0.0F;
     float pid_tn = 0.0F;
     float pid_tv = 0.0F;
+    float pump_kp = 0.0F;
+    float pump_ki = 0.0F;
+    float pump_kd = 0.0F;
     float brew_sp = 0.0F;
     float steam_sp = 0.0F;
     float brew_t = 0.0F;
@@ -959,6 +1010,15 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     }
     if (!parse_float_in_range(pid_tv_txt, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &pid_tv)) {
         return reject_bad_request("Invalid pid_tv");
+    }
+    if (!parse_float_in_range(pump_kp_txt, 0.0F, 100.0F, &pump_kp)) {
+        return reject_bad_request("Invalid pump_kp");
+    }
+    if (!parse_float_in_range(pump_ki_txt, 0.0F, 10.0F, &pump_ki)) {
+        return reject_bad_request("Invalid pump_ki");
+    }
+    if (!parse_float_in_range(pump_kd_txt, 0.0F, 50.0F, &pump_kd)) {
+        return reject_bad_request("Invalid pump_kd");
     }
     if (!parse_float_in_range(brew_sp_txt,
                               cfg::pid::kSetpointMinC,
@@ -1019,6 +1079,9 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
         {kCfgPidKp, pid_kp_txt},
         {kCfgPidTn, pid_tn_txt},
         {kCfgPidTv, pid_tv_txt},
+        {kCfgPumpKp, pump_kp_txt},
+        {kCfgPumpKi, pump_ki_txt},
+        {kCfgPumpKd, pump_kd_txt},
         {kCfgBrewSetpoint, brew_sp_txt},
         {kCfgSteamSetpoint, steam_sp_txt},
         {kCfgBrewTime, brew_t_txt},
@@ -1045,7 +1108,8 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
         return httpd_resp_send_500(req);
     }
 
-    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp);
+    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp,
+                                     pump_kp, pump_ki, pump_kd);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req,
@@ -1816,9 +1880,9 @@ void pump_task(void* arg) {
     // Phase 2: pressure PID — drives pump power during brew to maintain setpoint.
     espid::pid::Controller pid;
     espid::pid::Controller::Config pcfg{};
-    pcfg.kp             = cfg::pump::kPidKp;
-    pcfg.ki             = cfg::pump::kPidKi;
-    pcfg.kd             = cfg::pump::kPidKd;
+    pcfg.kp             = g_runtime_control.pump_kp.load(std::memory_order_relaxed);
+    pcfg.ki             = g_runtime_control.pump_ki.load(std::memory_order_relaxed);
+    pcfg.kd             = g_runtime_control.pump_kd.load(std::memory_order_relaxed);
     pcfg.output_min     = cfg::pump::kPidOutputMin;
     pcfg.output_max     = cfg::pump::kPidOutputMax;
     pcfg.integral_min   = cfg::pump::kPidIntegralMin;
@@ -1833,6 +1897,11 @@ void pump_task(void* arg) {
     for (;;) {
         const bool brewing = g_shot.running.load(std::memory_order_relaxed);
         if (brewing) {
+            // Reload gains every brew cycle so web-UI changes take effect.
+            pcfg.kp = g_runtime_control.pump_kp.load(std::memory_order_relaxed);
+            pcfg.ki = g_runtime_control.pump_ki.load(std::memory_order_relaxed);
+            pcfg.kd = g_runtime_control.pump_kd.load(std::memory_order_relaxed);
+            pid.set_config(pcfg);
             if (g_pressure.valid.load(std::memory_order_acquire)) {
                 const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
                 const float power = pid.update(cfg::pump::kPressureSetpointBar, p);
