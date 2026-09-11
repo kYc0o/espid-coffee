@@ -152,6 +152,10 @@ constexpr float         kSetpointMinC   = 70.0F;
 constexpr float         kSetpointMaxC   = 110.0F;
 constexpr float         kSteamSetpointMinC = 110.0F;
 constexpr float         kSteamSetpointMaxC = 170.0F;
+// Extra degrees added to setpoint while brewing to compensate for cold water.
+constexpr float         kBrewingBiasC      = 5.0F;
+constexpr float         kBrewingBiasMinC   = 0.0F;
+constexpr float         kBrewingBiasMaxC   = 20.0F;
 }  // namespace pid
 
 // ---------------------------------------------------------------------------
@@ -313,7 +317,8 @@ constexpr std::size_t   kClientIdMaxLen = 64;
 constexpr std::size_t   kUriMaxLen      = 96;
 constexpr std::size_t   kTopicMaxLen    = 96;
 constexpr std::size_t   kPayloadMaxLen  = 256;
-constexpr std::uint32_t kTemperaturePublishPeriodMs = 30'000;
+constexpr std::uint32_t kTemperaturePublishPeriodMs = 10'000;  // 10 s idle; 2 s during brew
+constexpr std::uint32_t kTemperatureBrewPublishPeriodMs = 2'000;
 constexpr std::uint32_t kPressurePublishPeriodMs = 500;
 constexpr std::uint32_t kRuntimeSettingsCheckPeriodMs = 1000;
 constexpr std::uint32_t kSchedulerPeriodMs = 100;
