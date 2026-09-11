@@ -198,16 +198,19 @@ constexpr std::uint32_t  kStartupFillTimeoutMs    = 120'000;  // empty boiler ta
 constexpr float          kStartupFillPowerPct     = 100.0F;
 
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
-// PID gains are conservative starting points — tune on the machine.
+// Starting-point gains for a vibratory pump (tune upward from here):
+//   Kp: lower than you'd think — pump response is fast and nonlinear.
+//   Ki: small to avoid integral windup during the initial pressure ramp.
+//   Kd: relatively large to damp the overshoot; sample at 10 Hz.
 constexpr float          kPressureSetpointBar = 9.0F;
-constexpr float          kPidKp               = 10.0F;
-constexpr float          kPidKi               = 0.5F;
-constexpr float          kPidKd               = 0.2F;
+constexpr float          kPidKp               = 3.0F;
+constexpr float          kPidKi               = 0.05F;
+constexpr float          kPidKd               = 1.5F;
 constexpr float          kPidOutputMin        = 0.0F;
 constexpr float          kPidOutputMax        = 100.0F;
-constexpr float          kPidIntegralMin      = -20.0F;
-constexpr float          kPidIntegralMax      = 20.0F;
-constexpr float          kPidSamplePeriodS    = 0.2F;
+constexpr float          kPidIntegralMin      = -5.0F;
+constexpr float          kPidIntegralMax      = 5.0F;
+constexpr float          kPidSamplePeriodS    = 0.1F;  // 10 Hz
 constexpr std::uint32_t  kTaskStackBytes      = 4096;
 constexpr std::uint32_t  kTaskPriority        = 5;
 constexpr std::int32_t   kTaskCore            = 1;
