@@ -180,7 +180,7 @@ constexpr bool          kActiveHigh     = true;
 // each half-cycle at the computed phase delay.
 namespace pump {
 constexpr bool          kEnabled             = true;
-constexpr gpio_num_t    kSsrGpio             = GPIO_NUM_15;  // always-on SSR; PSM triac controls power
+constexpr gpio_num_t    kSsrGpio             = GPIO_NUM_15;  // always-on pump neutral SSR
 constexpr bool          kSsrActiveHigh       = true;
 constexpr gpio_num_t    kPsmGpio             = GPIO_NUM_17;  // triac gate out
 constexpr bool          kPsmActiveHigh       = true;

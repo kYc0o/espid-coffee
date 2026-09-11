@@ -2097,7 +2097,10 @@ extern "C" void app_main(void) {
             (void)pump_ssr.open();
             // Hold the pin HIGH across any sleep; PSM triac controls actual power.
             (void)gpio_hold_en(static_cast<gpio_num_t>(ssr_cfg.gpio));
-            ESP_LOGI(kTag, "pump SSR always-on on gpio=%d", ssr_cfg.gpio);
+            const int readback = gpio_get_level(static_cast<gpio_num_t>(ssr_cfg.gpio));
+            ESP_LOGI(kTag, "pump SSR gpio=%d written=1 readback=%d%s",
+                     ssr_cfg.gpio, readback,
+                     readback == 1 ? "" : " ← GPIO FAULT - pin may be damaged");
         }
 
         espid::pump::PsmPump::Config pump_cfg{};
@@ -2131,7 +2134,11 @@ extern "C" void app_main(void) {
                      espid::hal_cpp::to_string(vs.error()));
         } else {
             valve_ready = true;
-            ESP_LOGI(kTag, "valve ready on gpio=%d", vcfg.gpio);
+            // Valve starts closed (LOW). Readback confirms GPIO is responding.
+            const int readback = gpio_get_level(static_cast<gpio_num_t>(vcfg.gpio));
+            ESP_LOGI(kTag, "valve gpio=%d written=0 readback=%d%s",
+                     vcfg.gpio, readback,
+                     readback == 0 ? " (closed, OK)" : " ← UNEXPECTED HIGH");
         }
     }
 
