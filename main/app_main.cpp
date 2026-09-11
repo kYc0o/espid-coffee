@@ -1995,9 +1995,11 @@ void pump_task(void* arg) {
                 (void)ctx->psm->set_power_pct(power);
                 if ((++log_div % 10U) == 0U) {
                     const std::uint32_t zc_now = ctx->psm->zc_count();
+                    const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
                     // ZC delta over 10 samples (1 s): expect ~100 for healthy 50 Hz.
-                    ESP_LOGI(kTag, "pump: p=%.2fbar power=%.1f%% zc/s=%u",
+                    ESP_LOGI(kTag, "pump: p=%.2fbar power=%.1f%% temp=%.1fC zc/s=%u",
                              static_cast<double>(p), static_cast<double>(power),
+                             static_cast<double>(temp_c),
                              static_cast<unsigned>(zc_now - last_zc));
                     last_zc = zc_now;
                 }

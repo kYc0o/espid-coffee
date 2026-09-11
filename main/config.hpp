@@ -153,7 +153,7 @@ constexpr float         kSetpointMaxC   = 110.0F;
 constexpr float         kSteamSetpointMinC = 110.0F;
 constexpr float         kSteamSetpointMaxC = 170.0F;
 // Extra degrees added to setpoint while brewing to compensate for cold water.
-constexpr float         kBrewingBiasC      = 5.0F;
+constexpr float         kBrewingBiasC      = 2.0F;
 constexpr float         kBrewingBiasMinC   = 0.0F;
 constexpr float         kBrewingBiasMaxC   = 20.0F;
 }  // namespace pid
