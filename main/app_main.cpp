@@ -2586,6 +2586,15 @@ extern "C" void app_main(void) {
         }
     }
 
+    if (cfg::hawkbit::kEnabled) {
+        ok = xTaskCreatePinnedToCore(
+            &hawkbit_task, "hawkbit", cfg::hawkbit::kTaskStackBytes, nullptr,
+            cfg::hawkbit::kTaskPriority, nullptr, cfg::hawkbit::kTaskCore);
+        if (ok != pdPASS) {
+            ESP_LOGW(kTag, "hawkbit_task create failed - OTA disabled");
+        }
+    }
+
     // Idle heartbeat from app_main so we can see the device is alive even if
     // no frames arrive (e.g. sensor disconnected).
     std::uint32_t tick = 0;
