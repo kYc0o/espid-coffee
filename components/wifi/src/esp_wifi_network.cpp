@@ -288,6 +288,9 @@ hal_cpp::Status EspWifiNetwork::start_sta_() noexcept {
             ESP_LOGE(kTag, "esp_wifi_start failed: %s", esp_err_to_name(start_err));
             return hw_fault_status();
         }
+        // Coffee machine is always mains-powered; disable light sleep so GPIO
+        // outputs (SSR, heater) are never isolated between beacon intervals.
+        (void)esp_wifi_set_ps(WIFI_PS_NONE);
         wifi_started_ = true;
     }
 
