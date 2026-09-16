@@ -44,16 +44,17 @@ this file is the human-facing companion for bench and in-machine work.
 | Heater **SSR** | `GPIO47` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
 | Brew switch | `GPIO5` | in | internal pull-**down** | Switch sources 3V3 when closed → active-high. |
 | Steam switch | `GPIO4` | in | internal pull-**down** | Switch to 3V3; `kPulldownEnable = true`. |
-| Valve / 3-way solenoid (+ completes pump AC circuit) | `GPIO16` | out | none | Open during brew AND during startup fill. |
-| Pump **neutral SSR** | `GPIO15` | out | none | Driven HIGH at boot; completes the pump AC neutral path. |
-| Pump **PSM** triac gate | `GPIO17` | out | none | To dimmer/triac gate. |
-| Pump **zero-cross** input | `GPIO18` | in | **10 kΩ → 3V3** (or internal pull-up) | Opto ZC, ~100 Hz pulses at 50 Hz mains. |
+| Valve / 3-way solenoid | `GPIO16` | out | none | Open during brew AND during startup fill. |
+| Pump **neutral SSR** | `GPIO15` | — | — | **Removed** — pump neutral now wired directly to mains. `kSsrEnabled = false`. |
+| Pump **PSM** triac gate | `GPIO17` | out | none | To dimmer/triac gate. Pulse-skip (integral-cycle) firing at the zero-cross. |
+| Pump **zero-cross** input | `GPIO18` | in | **10 kΩ → 3V3** pull-up + **2.2 kΩ series + 100 nF → GND** RC low-pass | Opto ZC, ~100 Hz at 50 Hz mains. RC τ ≈ 220 µs (f_c ≈ 720 Hz). S3 pin glitch filter also on. |
 | Scale HX711 #1 **DOUT** | `GPIO7` | in | none | HX711 drives push-pull. |
 | Scale HX711 #2 **DOUT** | `GPIO10` | in | none | Second load cell. |
 | Scale HX711 **SCK** (shared) | `GPIO21` | out | none | Common clock to both HX711. |
 
 Free for future use: `GPIO2`, `GPIO6`, `GPIO11`, `GPIO12`, `GPIO13`,
-`GPIO14`, `GPIO39`, `GPIO40`, `GPIO41`, `GPIO42`.
+`GPIO14`, `GPIO15` (freed by SSR removal), `GPIO39`, `GPIO40`, `GPIO41`,
+`GPIO42`.
 
 Deferred (not wired yet): hot-water switch, water-tank level sensor,
 rotary encoder, status/brew LED, flow meter, power switch, E-trigger.
@@ -79,7 +80,7 @@ rotary encoder, status/brew LED, flow meter, power switch, E-trigger.
 | I²C SDA, SCL | 4.7 kΩ to **3V3** each | Bus idle-high; internal pulls too weak. |
 | Heater SSR (`GPIO47`) | 10 kΩ to **GND** | Guarantee heater OFF while the S3 boots (pin is Hi-Z). |
 | Steam switch (`GPIO4`) | internal pull-**down** | Switch sources 3V3 when closed → hold low when open. |
-| Pump zero-cross (`GPIO18`) | pull-**up** (internal ok, 10 kΩ ext. for noise) | Opto output is open-collector. |
+| Pump zero-cross (`GPIO18`) | 10 kΩ pull-**up** to 3V3 + **2.2 kΩ series + 100 nF to GND** RC | Opto is open-collector; RC (τ ≈ 220 µs) + S3 pin glitch filter tame opto noise. |
 | Brew switch (`GPIO5`) | internal pull-**up** | Config uses active-low to GND. |
 | Valve / Pump gate outputs | none | Push-pull outputs. |
 | TSIC temp, HX711 DOUT/SCK | none | Push-pull sensor/ADC outputs. |
@@ -95,10 +96,12 @@ I²C (speed) and the heater SSR (boot safety) need external resistors.
 - 5 V → 3.3 V is on-board (DevKitC regulator). Provide **5 V** from a
   small isolated PSU (or the S3's USB-C on the bench).
 - **Isolated relay module** for the 3-way valve (`GPIO16`).
-- **Solid-state relay (SSR)** for the heater (`GPIO15`), with the
+- **Solid-state relay (SSR)** for the heater (`GPIO47`), with the
   10 kΩ pull-down on its control line.
 - **Triac dimmer + zero-cross detector** for the pump PSM
-  (`GPIO17` gate, `GPIO18` ZC).
+  (`GPIO17` gate, `GPIO18` ZC). Fit the **2.2 kΩ + 100 nF** RC
+  low-pass on the ZC line (see §2). Pump neutral is wired directly to
+  mains (the `GPIO15` neutral SSR was removed).
 - **2× HX711** amplifier boards, one per drip-tray load cell.
 
 ---
