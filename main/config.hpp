@@ -238,6 +238,26 @@ constexpr float          kPidSamplePeriodS    = 0.1F;  // 10 Hz
 constexpr std::uint32_t  kTaskStackBytes      = 4096;
 constexpr std::uint32_t  kTaskPriority        = 5;
 constexpr std::int32_t   kTaskCore            = 1;
+
+// ---------------------------------------------------------------------------
+// Bench / bring-up test mode (pump only).
+// ---------------------------------------------------------------------------
+// When kTestMode is true, app_main runs pump_test_task instead of the normal
+// fill+PID pump_task, and does NOT start the heater control loop or the brew
+// button task. The test first measures the zero-cross frequency with the pump
+// OFF, then sweeps the duty cycle high→low so gate/phase timing can be checked
+// on a scope or by ear.
+//
+// SAFETY: the heater stays OFF the whole time, but the pump runs DRY during
+// the sweep. Keep steps short and stay at the machine. Leave kTestMode = false
+// for production firmware.
+constexpr bool           kTestMode            = false;
+constexpr std::uint32_t  kTestZcMeasureMs     = 3'000;  // ZC measure (pump off)
+constexpr std::uint32_t  kTestStepMs          = 2'500;  // dwell per duty step
+constexpr std::uint32_t  kTestGapMs           = 1'000;  // pump OFF between steps
+// Duty-cycle sweep, high→low. Each step starts from OFF (see kTestGapMs) so the
+// pump-start is clearly audible. Floored well above the inaudible/no-flow zone.
+constexpr float          kTestSweepPct[]      = {100.0F, 75.0F, 50.0F};
 }  // namespace pump
 
 // ---------------------------------------------------------------------------

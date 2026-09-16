@@ -2062,6 +2062,97 @@ void pump_task(void* arg) {
     }
 }
 
+// Pump bench/bring-up test: measure the zero-cross signal, then sweep the
+// duty cycle. Heater is kept OFF by app_main when cfg::pump::kTestMode is set,
+// so the boiler never heats; the pump does run DRY during the sweep, so keep
+// it short. Idles forever once the sweep completes.
+void pump_test_task(void* arg) {
+    auto* ctx = static_cast<PumpTaskCtx*>(arg);
+    ESP_LOGW(kTag,
+             "PUMP TEST MODE — heater OFF, pump will run DRY. Stay present.");
+    ESP_LOGI(kTag, "pump_test: running on core %d", xPortGetCoreID());
+
+    const float    expected_hz = 2.0F * static_cast<float>(cfg::pump::kMainsFrequencyHz);
+    const unsigned expected_edges =
+        static_cast<unsigned>(2U * cfg::pump::kMainsFrequencyHz);
+
+    // Phase A: measure the zero-cross frequency with the pump OFF (no dry run
+    // while we characterise the ZC signal).
+    (void)ctx->psm->set_power_pct(0.0F);
+    ctx->psm->reset_zc_stats();
+    ESP_LOGI(kTag, "pump_test: measuring ZC for %u ms (pump OFF)...",
+             static_cast<unsigned>(cfg::pump::kTestZcMeasureMs));
+    vTaskDelay(pdMS_TO_TICKS(cfg::pump::kTestZcMeasureMs));
+
+    const auto  zc   = ctx->psm->zc_stats();
+    const float secs = static_cast<float>(cfg::pump::kTestZcMeasureMs) / 1000.0F;
+    const float hz   = static_cast<float>(zc.accepted) / secs;
+    ESP_LOGI(kTag,
+             "pump_test: ZC accepted=%u rejected=%u -> %.1f Hz (expect ~%u)",
+             static_cast<unsigned>(zc.accepted),
+             static_cast<unsigned>(zc.rejected),
+             static_cast<double>(hz), expected_edges);
+    ESP_LOGI(kTag,
+             "pump_test: ZC interval last/min/max = %u/%u/%u us (jitter %u us)",
+             static_cast<unsigned>(zc.last_interval_us),
+             static_cast<unsigned>(zc.min_interval_us),
+             static_cast<unsigned>(zc.max_interval_us),
+             static_cast<unsigned>(zc.max_interval_us >= zc.min_interval_us
+                                       ? zc.max_interval_us - zc.min_interval_us
+                                       : 0U));
+    if (hz < expected_hz * 0.9F || hz > expected_hz * 1.1F) {
+        ESP_LOGW(kTag,
+                 "pump_test: ZC frequency off by >10%% — check mains freq, "
+                 "wiring, or a dead opto");
+    }
+    if (zc.rejected > (zc.accepted / 4U)) {
+        ESP_LOGW(kTag,
+                 "pump_test: NOISY ZC (rejected %u vs accepted %u) — add an RC "
+                 "filter / Schmitt trigger, or enable a GPIO glitch filter",
+                 static_cast<unsigned>(zc.rejected),
+                 static_cast<unsigned>(zc.accepted));
+    }
+
+    // Phase B: duty sweep. Open the valve so the pump is not dead-heading.
+    // Each step starts from OFF (kTestGapMs) so the pump-start is audible.
+    if (ctx->valve != nullptr) {
+        (void)ctx->valve->open();
+    }
+    for (const float duty : cfg::pump::kTestSweepPct) {
+        (void)ctx->psm->set_power_pct(0.0F);
+        vTaskDelay(pdMS_TO_TICKS(cfg::pump::kTestGapMs));
+        ctx->psm->reset_zc_stats();
+        (void)ctx->psm->set_power_pct(duty);
+        ESP_LOGI(kTag, "pump_test: duty=%.0f%% for %u ms",
+                 static_cast<double>(duty),
+                 static_cast<unsigned>(cfg::pump::kTestStepMs));
+        vTaskDelay(pdMS_TO_TICKS(cfg::pump::kTestStepMs));
+        const auto s = ctx->psm->zc_stats();
+        const float fire_pct = (s.accepted > 0U)
+            ? (100.0F * static_cast<float>(s.fired) / static_cast<float>(s.accepted))
+            : 0.0F;
+        ESP_LOGI(kTag,
+                 "pump_test:   zc=%u fired=%u (%.1f%% of cycles, target %.0f%%) "
+                 "rejected=%u  zc-int min/max=%u/%u us",
+                 static_cast<unsigned>(s.accepted),
+                 static_cast<unsigned>(s.fired),
+                 static_cast<double>(fire_pct), static_cast<double>(duty),
+                 static_cast<unsigned>(s.rejected),
+                 static_cast<unsigned>(s.min_interval_us),
+                 static_cast<unsigned>(s.max_interval_us));
+    }
+
+    // Done: pump off, valve closed, idle so nothing else drives the pump.
+    (void)ctx->psm->set_power_pct(0.0F);
+    if (ctx->valve != nullptr) {
+        (void)ctx->valve->close();
+    }
+    ESP_LOGI(kTag, "pump_test: sweep complete — pump OFF, idling.");
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 // OTA task: polls HawkBit every kPollIntervalMs for firmware updates.
 void hawkbit_task(void* /*arg*/) {
     // Wait for Wi-Fi STA connection before first poll.
@@ -2485,16 +2576,21 @@ extern "C" void app_main(void) {
         }
     }
 
-    ok = xTaskCreatePinnedToCore(
-        &control_task, "control", cfg::pid::kTaskStackBytes, &heater,
-        cfg::pid::kTaskPriority, nullptr, cfg::pid::kTaskCore);
-    if (ok != pdPASS) {
-        ESP_LOGE(kTag, "control_task create failed - halting");
-        for (;;) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+    // Heater PID control loop. Skipped in pump test mode so the boiler
+    // never heats while the pump is being characterised dry.
+    if (!cfg::pump::kTestMode) {
+        ok = xTaskCreatePinnedToCore(
+            &control_task, "control", cfg::pid::kTaskStackBytes, &heater,
+            cfg::pid::kTaskPriority, nullptr, cfg::pid::kTaskCore);
+        if (ok != pdPASS) {
+            ESP_LOGE(kTag, "control_task create failed - halting");
+            for (;;) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
         }
+    } else {
+        ESP_LOGW(kTag, "pump test mode: heater control loop DISABLED");
     }
-
     if (pressure_ready) {
         static PressureTaskCtx pressure_ctx{&pressure};
         ok = xTaskCreatePinnedToCore(
@@ -2510,10 +2606,12 @@ extern "C" void app_main(void) {
         static PumpTaskCtx pump_ctx{&pump,
                                     valve_ready ? &valve : nullptr};
         ok = xTaskCreatePinnedToCore(
-            &pump_task, "pump", cfg::pump::kTaskStackBytes, &pump_ctx,
+            cfg::pump::kTestMode ? &pump_test_task : &pump_task,
+            cfg::pump::kTestMode ? "pump_test" : "pump",
+            cfg::pump::kTaskStackBytes, &pump_ctx,
             cfg::pump::kTaskPriority, nullptr, cfg::pump::kTaskCore);
         if (ok != pdPASS) {
-            ESP_LOGW(kTag, "pump_task create failed - fill skipped");
+            ESP_LOGW(kTag, "pump task create failed - fill skipped");
             g_fill_complete.store(true, std::memory_order_relaxed);
         }
     } else {
@@ -2543,7 +2641,7 @@ extern "C" void app_main(void) {
 
     // Brew button.  Hardware debounce + internal pull-up fallback;
     // software debounce per cfg::brew::kDebounceMs.
-    if (cfg::brew::kEnabled) {
+    if (cfg::brew::kEnabled && !cfg::pump::kTestMode) {
         gpio_config_t bcfg{};
         bcfg.pin_bit_mask = 1ULL << static_cast<int>(cfg::brew::kButtonGpio);
         bcfg.mode         = GPIO_MODE_INPUT;
