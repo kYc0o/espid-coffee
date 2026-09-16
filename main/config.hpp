@@ -222,14 +222,12 @@ constexpr float          kStartupFillPowerPct     = 100.0F;
 constexpr std::uint32_t  kStartupFillMinZcCount   = 3000;  // 30 s minimum
 
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
-// Starting-point gains for a vibratory pump (tune upward from here):
-//   Kp: lower than you'd think — pump response is fast and nonlinear.
-//   Ki: small to avoid integral windup during the initial pressure ramp.
-//   Kd: relatively large to damp the overshoot; sample at 10 Hz.
+// Gains validated on hardware (blind PF + gauge): fast rise to 9 bar (~7 s),
+// dead-on hold at ~3 % pump, and active recovery from a steam-wand disturbance.
 constexpr float          kPressureSetpointBar = 9.0F;
-constexpr float          kPidKp               = 3.0F;
-constexpr float          kPidKi               = 0.05F;
-constexpr float          kPidKd               = 1.5F;
+constexpr float          kPidKp               = 15.0F;
+constexpr float          kPidKi               = 0.3F;
+constexpr float          kPidKd               = 0.8F;
 constexpr float          kPidOutputMin        = 0.0F;
 constexpr float          kPidOutputMax        = 100.0F;
 constexpr float          kPidIntegralMin      = -5.0F;
