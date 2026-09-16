@@ -12,6 +12,7 @@ idf_component_register(
         hal_cpp
         esp_driver_gpio
         esp_driver_gptimer
+        esp_timer
 )
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)

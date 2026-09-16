@@ -2326,19 +2326,22 @@ extern "C" void app_main(void) {
 
     // PSM pump dimmer: ISR-driven, no periodic task. Starts OFF (0 %).
     if (cfg::pump::kEnabled) {
-        // Drive the pump SSR always-on; PSM triac controls actual power.
-        espid::valve::SolenoidValve::Config ssr_cfg{};
-        ssr_cfg.gpio        = static_cast<int>(cfg::pump::kSsrGpio);
-        ssr_cfg.active_high = cfg::pump::kSsrActiveHigh;
-        static espid::valve::SolenoidValve pump_ssr;
-        if (pump_ssr.init(ssr_cfg).ok()) {
-            (void)pump_ssr.open();
-            // Hold the pin HIGH across any sleep; PSM triac controls actual power.
-            (void)gpio_hold_en(static_cast<gpio_num_t>(ssr_cfg.gpio));
-            const int readback = gpio_get_level(static_cast<gpio_num_t>(ssr_cfg.gpio));
-            ESP_LOGI(kTag, "pump SSR gpio=%d written=1 readback=%d%s",
-                     ssr_cfg.gpio, readback,
-                     readback == 1 ? "" : " ← GPIO FAULT - pin may be damaged");
+        // Pump neutral SSR (optional): only driven if still wired in. With the
+        // neutral connected directly to mains, kSsrEnabled is false.
+        if (cfg::pump::kSsrEnabled) {
+            espid::valve::SolenoidValve::Config ssr_cfg{};
+            ssr_cfg.gpio        = static_cast<int>(cfg::pump::kSsrGpio);
+            ssr_cfg.active_high = cfg::pump::kSsrActiveHigh;
+            static espid::valve::SolenoidValve pump_ssr;
+            if (pump_ssr.init(ssr_cfg).ok()) {
+                (void)pump_ssr.open();
+                // Hold the pin HIGH across any sleep; PSM triac controls power.
+                (void)gpio_hold_en(static_cast<gpio_num_t>(ssr_cfg.gpio));
+                const int readback = gpio_get_level(static_cast<gpio_num_t>(ssr_cfg.gpio));
+                ESP_LOGI(kTag, "pump SSR gpio=%d written=1 readback=%d%s",
+                         ssr_cfg.gpio, readback,
+                         readback == 1 ? "" : " ← GPIO FAULT - pin may be damaged");
+            }
         }
 
         espid::pump::PsmPump::Config pump_cfg{};
@@ -2347,6 +2350,8 @@ extern "C" void app_main(void) {
         pump_cfg.gate_active_high  = cfg::pump::kPsmActiveHigh;
         pump_cfg.mains_frequency_hz = cfg::pump::kMainsFrequencyHz;
         pump_cfg.gate_pulse_us     = cfg::pump::kGatePulseUs;
+        pump_cfg.glitch_filter_ns  =
+            cfg::pump::kZcGlitchFilterEnable ? cfg::pump::kZcGlitchFilterNs : 0U;
 
         const auto pmps = pump.init(pump_cfg);
         if (!pmps.ok()) {

@@ -1,15 +1,21 @@
-// PsmCore -- pure phase-control (PSM) firing-delay logic for the pump.
+// PsmCore -- pulse-skip (integral-cycle) modulation logic for the pump.
 //
-// Given a mains zero-cross reference and a requested power percentage,
-// computes how long after each zero-cross the triac gate must be fired.
-// Full power fires immediately at the zero-cross; lower power delays the
-// gate deeper into the half-cycle (classic phase-angle dimming). This
-// file has no ESP-IDF dependencies and is host-testable.
+// Power is expressed 0..100 % and interpreted as the fraction of mains cycles
+// the triac is allowed to fire. Selected cycles fire AT the zero-cross so a
+// full half-cycle passes (no phase chopping); unselected cycles are skipped.
+// This is the classic "PSM"/burst-firing scheme, which is the right fit for a
+// vibratory pump: the triac always latches at the zero-cross and there is far
+// less EMI than phase-angle control.
 //
-// Timing model: a half-cycle spans 1e6 / (2 * mains_hz) microseconds.
-// firing_delay_us scales linearly from 0 us at 100% to a full half-cycle
-// at 0% -- matching the common AC-dimmer mapping used for the vibratory
-// pump. The ISR/timer that consumes these values lives in the driver.
+// Modulation is done on WHOLE mains cycles (both half-cycles fired together)
+// so the inductive pump coil stays DC-balanced. A Bresenham accumulator spreads
+// the fired cycles evenly across the skip pattern (e.g. 70 % -> 7 of every 10
+// cycles, interleaved rather than 7 on then 3 off).
+//
+// on_half_cycle() is called once per mains zero-cross (every half-cycle) and
+// returns whether the gate should fire on that half-cycle. All state lives in
+// this object; the driver keeps a single instance driven solely from the ZC
+// ISR (single writer). This file has no ESP-IDF dependency and is host-testable.
 
 #pragma once
 
@@ -34,41 +40,64 @@ class PsmCore {
 
     std::uint32_t half_period_us() const noexcept { return half_period_us_; }
 
+    // Requested power 0..100 %. Rounded to whole-percent modulation steps.
     bool set_power_pct(float power_pct) noexcept {
         if (!std::isfinite(power_pct) || power_pct < 0.0F || power_pct > 100.0F) {
             return false;
         }
-        power_pct_ = power_pct;
+        power_pct_  = power_pct;
+        power_step_ = static_cast<std::uint32_t>(power_pct + 0.5F);  // 0..100
         return true;
+    }
+
+    // Fast path for the ISR: set the pre-validated integer step (0..100).
+    void set_power_step(std::uint32_t step) noexcept {
+        power_step_ = (step > kFullScale) ? kFullScale : step;
     }
 
     float power_pct() const noexcept { return power_pct_; }
 
-    // True when the triac should be fired at all during a half-cycle.
-    bool firing_enabled() const noexcept { return power_pct_ > 0.0F; }
+    std::uint32_t power_step() const noexcept { return power_step_; }
 
-    // Delay from the zero-cross edge to the gate pulse, in microseconds.
-    // Full power -> 0 us; lower power fires later. The returned value is
-    // only meaningful when firing_enabled() is true.
-    std::uint32_t firing_delay_us() const noexcept {
-        if (power_pct_ >= 100.0F) {
-            return 0;
+    // True when any cycle is allowed to fire.
+    bool firing_enabled() const noexcept { return power_step_ > 0U; }
+
+    // Advance one half-cycle (call once per zero-cross). Returns true if the
+    // triac gate should be fired now. The fire/skip decision is taken once per
+    // whole cycle and held across both of its half-cycles, so fired cycles are
+    // polarity-balanced.
+    bool on_half_cycle() noexcept {
+        // parity_ toggles each half-cycle; a whole-cycle boundary is when it
+        // returns to 0. Decide fire/skip there, then hold across both halves.
+        parity_ ^= 1U;
+        if (parity_ == 0U) {
+            accumulator_ += power_step_;
+            if (accumulator_ >= kFullScale) {
+                accumulator_ -= kFullScale;
+                fire_cycle_ = true;
+            } else {
+                fire_cycle_ = false;
+            }
         }
-        if (power_pct_ <= 0.0F) {
-            return half_period_us_;
-        }
-        const float delay =
-            static_cast<float>(half_period_us_) * (100.0F - power_pct_) / 100.0F;
-        auto us = static_cast<std::uint32_t>(delay + 0.5F);
-        if (us > half_period_us_) {
-            us = half_period_us_;
-        }
-        return us;
+        return fire_cycle_ && (power_step_ > 0U);
+    }
+
+    // Reset modulation state; call when (re)enabling the pump.
+    void reset() noexcept {
+        accumulator_ = 0U;
+        parity_      = 1U;  // first edge -> whole-cycle boundary
+        fire_cycle_  = false;
     }
 
    private:
+    static constexpr std::uint32_t kFullScale = 100U;
+
     std::uint32_t half_period_us_{10'000};  // 50 Hz default
     float         power_pct_{0.0F};
+    std::uint32_t power_step_{0U};          // rounded 0..100
+    std::uint32_t accumulator_{0U};
+    std::uint32_t parity_{1U};
+    bool          fire_cycle_{false};
 };
 
 }  // namespace espid::pump

@@ -190,14 +190,25 @@ constexpr bool          kActiveHigh     = true;
 // each half-cycle at the computed phase delay.
 namespace pump {
 constexpr bool          kEnabled             = true;
-constexpr gpio_num_t    kSsrGpio             = GPIO_NUM_15;  // always-on pump neutral SSR
+// Pump neutral SSR: removed from the circuit — neutral now wired directly
+// between pump and mains. Left in config (disabled) for reference/reuse.
+constexpr bool          kSsrEnabled          = false;
+constexpr gpio_num_t    kSsrGpio             = GPIO_NUM_15;  // (unused; SSR removed)
 constexpr bool          kSsrActiveHigh       = true;
 constexpr gpio_num_t    kPsmGpio             = GPIO_NUM_17;  // triac gate out
 constexpr bool          kPsmActiveHigh       = true;
 constexpr gpio_num_t    kZeroCrossGpio       = GPIO_NUM_18;  // opto ZC input
 constexpr bool          kZeroCrossActiveHigh = true;
+// ESP32-S3 hardware glitch filter on the ZC pin. The S3 only offers the fixed
+// pin glitch filter (~2 IO-MUX cycles, tens of ns) — a token backstop for fast
+// spikes. The RC filter on the opto output is the primary noise fix. 0 = off.
+constexpr bool          kZcGlitchFilterEnable = true;
+constexpr std::uint32_t kZcGlitchFilterNs     = 500;  // advisory; S3 filter is fixed
 constexpr std::uint32_t kMainsFrequencyHz    = 50;           // 100 Hz half-cycles
-constexpr std::uint32_t kGatePulseUs         = 50;           // RobotDyn-style gate pulse
+// Gate ON-time (hold) per fired half-cycle, held via a one-shot timer. ~2 ms
+// lets the triac latch the inductive pump as the mains voltage rises past the
+// zero-cross; a short blip often fails to latch and the pump runs erratically.
+constexpr std::uint32_t kGatePulseUs         = 2000;
 constexpr float         kDefaultPowerPct     = 100.0F;
 constexpr float         kPowerMinPct         = 0.0F;
 constexpr float         kPowerMaxPct         = 100.0F;
