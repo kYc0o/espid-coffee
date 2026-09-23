@@ -10,8 +10,15 @@
 //   - Derivative on **measurement** (not error). This eliminates the
 //     derivative "kick" that a setpoint step would otherwise produce
 //     and which can be brutal on a heater.
+//   - Optional first-order low-pass on the measured slope
+//     (`d_filter_tau_s`). Quantised sensors (TSIC: ~0.1 °C LSB) turn a
+//     single-LSB flicker into a large dPV/dt at high loop rates; the
+//     filter keeps the D term from amplifying that noise. 0 = unfiltered.
 //   - Integral anti-windup via fixed clamps (`integral_min/max`). The
 //     output is independently clamped to `output_min/max`.
+//   - The integrator stores the already-`ki`-scaled sum, so swapping
+//     gains with `set_config()` mid-run is bumpless. `ki == 0` freezes
+//     the integral at its current contribution.
 //   - Stateless w.r.t. the caller; copy/move freely. Not thread-safe;
 //     drive from a single task.
 
@@ -30,6 +37,17 @@ class Controller {
         float integral_min    = -1.0F;
         float integral_max    =  1.0F;
         float sample_period_s = 0.1F;  // 10 Hz default
+        float d_filter_tau_s  = 0.0F;  // slope low-pass time constant; 0 = off
+    };
+
+    // Per-term breakdown of the most recent `update()`, for diagnostics.
+    struct Terms {
+        float p          = 0.0F;
+        float i          = 0.0F;
+        float d          = 0.0F;
+        float slope      = 0.0F;  // filtered d(measurement)/dt, units/s
+        float unclamped  = 0.0F;  // p + i + d before output clamp
+        float output     = 0.0F;
     };
 
     Controller() = default;
@@ -43,7 +61,9 @@ class Controller {
     void reset() noexcept {
         integral_         = 0.0F;
         last_measurement_ = 0.0F;
+        slope_            = 0.0F;
         has_last_         = false;
+        terms_            = Terms{};
     }
 
     // Step the controller. `setpoint` and `measurement` must share
@@ -59,29 +79,46 @@ class Controller {
         // Derivative on measurement: rejects setpoint-step kicks.
         float d_term = 0.0F;
         if (has_last_ && cfg_.sample_period_s > 0.0F) {
-            const float d_meas =
+            const float raw_slope =
                 (measurement - last_measurement_) / cfg_.sample_period_s;
-            d_term = -cfg_.kd * d_meas;
+            if (cfg_.d_filter_tau_s > 0.0F) {
+                const float alpha = cfg_.sample_period_s /
+                                    (cfg_.d_filter_tau_s + cfg_.sample_period_s);
+                slope_ += alpha * (raw_slope - slope_);
+            } else {
+                slope_ = raw_slope;
+            }
+            d_term = -cfg_.kd * slope_;
         }
         last_measurement_ = measurement;
         has_last_         = true;
 
-        float out = cfg_.kp * error + integral_ + d_term;
+        const float p_term = cfg_.kp * error;
+        float out = p_term + integral_ + d_term;
+        terms_.p         = p_term;
+        terms_.i         = integral_;
+        terms_.d         = d_term;
+        terms_.slope     = slope_;
+        terms_.unclamped = out;
         if (out > cfg_.output_max) out = cfg_.output_max;
         if (out < cfg_.output_min) out = cfg_.output_min;
+        terms_.output = out;
         return out;
     }
 
     // Test/diagnostic accessors. Const-only; do not mutate state from
     // outside `update()` or `reset()`.
-    float integral_state() const noexcept    { return integral_; }
-    float last_measurement() const noexcept  { return last_measurement_; }
+    float        integral_state() const noexcept    { return integral_; }
+    float        last_measurement() const noexcept  { return last_measurement_; }
+    const Terms& last_terms() const noexcept        { return terms_; }
 
    private:
     Config cfg_{};
     float  integral_         = 0.0F;
     float  last_measurement_ = 0.0F;
+    float  slope_            = 0.0F;
     bool   has_last_         = false;
+    Terms  terms_{};
 };
 
 }  // namespace espid::pid

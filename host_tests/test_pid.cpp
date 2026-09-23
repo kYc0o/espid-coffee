@@ -170,4 +170,83 @@ TEST(PidController, ResetClearsIntegralAndDerivativeHistory) {
     EXPECT_NEAR(pid.update(0.0F, 9999.0F), 0.0F, kEps);
 }
 
+TEST(PidController, DerivativeFilterAttenuatesSingleStep) {
+    Controller::Config c{};
+    c.kd              = 1.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    c.sample_period_s = 0.2F;
+    c.d_filter_tau_s  = 0.8F;  // alpha = 0.2 / (0.8 + 0.2) = 0.2
+    Controller pid(c);
+
+    (void)pid.update(0.0F, 90.0F);
+    // Raw slope = 0.1 / 0.2 = 0.5/s; filtered = 0.2 * 0.5 = 0.1/s.
+    EXPECT_NEAR(pid.update(0.0F, 90.1F), -0.1F, 1e-4F);
+    EXPECT_NEAR(pid.last_terms().slope, 0.1F, 1e-4F);
+    // Flat afterwards: filtered slope decays by (1 - alpha) = 0.8 per step.
+    EXPECT_NEAR(pid.update(0.0F, 90.1F), -0.08F, 1e-4F);
+}
+
+TEST(PidController, DerivativeFilterConvergesToTrueRamp) {
+    Controller::Config c{};
+    c.kd              = 1.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.sample_period_s = 0.2F;
+    c.d_filter_tau_s  = 1.0F;
+    Controller pid(c);
+
+    float meas = 90.0F;
+    for (int i = 0; i < 200; ++i) {
+        (void)pid.update(0.0F, meas);
+        meas -= 0.1F;  // -0.5 °C/s
+    }
+    EXPECT_NEAR(pid.last_terms().slope, -0.5F, 1e-3F);
+}
+
+TEST(PidController, LastTermsReportBreakdownAndClamp) {
+    Controller::Config c{};
+    c.kp              = 10.0F;
+    c.ki              = 1.0F;
+    c.output_min      = 0.0F;
+    c.output_max      = 15.0F;
+    c.integral_min    = -100.0F;
+    c.integral_max    =  100.0F;
+    c.sample_period_s = 1.0F;
+    Controller pid(c);
+
+    // error = 2 → P = 20, I = 2, D = 0 (first call); clamps to 15.
+    EXPECT_FLOAT_EQ(pid.update(2.0F, 0.0F), 15.0F);
+    const auto& t = pid.last_terms();
+    EXPECT_FLOAT_EQ(t.p, 20.0F);
+    EXPECT_FLOAT_EQ(t.i, 2.0F);
+    EXPECT_FLOAT_EQ(t.d, 0.0F);
+    EXPECT_FLOAT_EQ(t.unclamped, 22.0F);
+    EXPECT_FLOAT_EQ(t.output, 15.0F);
+}
+
+TEST(PidController, GainSwapIsBumplessAndZeroKiFreezesIntegral) {
+    Controller::Config c{};
+    c.kp              = 0.0F;
+    c.ki              = 1.0F;
+    c.output_min      = -1000.0F;
+    c.output_max      =  1000.0F;
+    c.integral_min    = -1000.0F;
+    c.integral_max    =  1000.0F;
+    c.sample_period_s = 1.0F;
+    Controller pid(c);
+
+    (void)pid.update(3.0F, 0.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 3.0F);
+
+    // Swap to "brew" gains with ki = 0: integral contribution is held.
+    Controller::Config brew = c;
+    brew.ki = 0.0F;
+    pid.set_config(brew);
+    EXPECT_FLOAT_EQ(pid.update(0.0F, 5.0F), 3.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 3.0F);
+}
+
 }  // namespace
