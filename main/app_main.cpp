@@ -2320,11 +2320,28 @@ void pump_task(void* arg) {
         cfg::pump::kStartupFillTimeoutMs;
     const std::uint32_t zc_at_fill_start = ctx->psm->zc_count();
     bool fill_ok = false;
+    std::uint32_t confirm_count = 0;
     for (;;) {
         const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
-        if (p >= cfg::pump::kStartupFillThresholdBar) {
+        const bool usable = g_pressure.valid.load(std::memory_order_acquire) &&
+                            !g_pressure.stale.load(std::memory_order_relaxed);
+        // One bad frame must not satisfy the dry-boiler guard: the threshold
+        // has to hold across consecutive good samples before we trust it.
+        if (usable && p >= cfg::pump::kStartupFillThresholdBar) {
+            ++confirm_count;
+        } else {
+            if (confirm_count > 0) {
+                ESP_LOGW(kTag,
+                         "pump: fill reading not confirmed (p=%.2f bar, usable=%d) — restarting count",
+                         static_cast<double>(p), usable ? 1 : 0);
+            }
+            confirm_count = 0;
+        }
+        if (confirm_count >= cfg::pump::kStartupFillConfirmSamples) {
             fill_ok = true;
-            ESP_LOGI(kTag, "pump: fill done (p=%.2f bar)", static_cast<double>(p));
+            ESP_LOGI(kTag, "pump: fill done (p=%.2f bar, %u consecutive samples)",
+                     static_cast<double>(p),
+                     static_cast<unsigned>(confirm_count));
             break;
         }
         if (static_cast<std::uint64_t>(esp_timer_get_time() / 1000) >= fill_deadline_ms) {

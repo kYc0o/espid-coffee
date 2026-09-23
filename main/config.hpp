@@ -260,6 +260,11 @@ constexpr float          kStartupFillPowerPct     = 100.0F;
 // Minimum ZC edges during fill that confirm the pump was actually running.
 // At 100/s (50 Hz both-edge), 60 s of pumping = 6000 edges.
 constexpr std::uint32_t  kStartupFillMinZcCount   = 3000;  // 30 s minimum
+// Consecutive above-threshold, non-stale samples needed to accept the fill.
+// A single bogus ABP2 frame (7.33 bar on 2026-09-22, with the very next read
+// back at 0.17 bar) otherwise satisfies the dry-boiler guard in ~3 s.
+constexpr std::uint32_t  kStartupFillConfirmSamples = 3;
+
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
 // The original gains were validated with a blind portafilter, which passes no
 // water: holding 9 bar then takes ~3 % pump and the integral never has to
