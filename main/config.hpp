@@ -136,13 +136,25 @@ constexpr float         kEmergencyResetTempC = 100.0F;
 // comfortably below kSteamEmergencyStopTempC for overshoot headroom.
 constexpr float         kSteamEmergencyStopTempC  = 165.0F;
 constexpr float         kSteamEmergencyResetTempC = 145.0F;
-constexpr float         kKp             = 30.0F;
-constexpr float         kKi             = 0.4F;
-constexpr float         kKd             = 60.0F;
+// Identified from a cold-start log (2026-09-16): at 100 % the boiler climbs
+// 0.48 °C/s after ~4 s dead time and two lags of ~12 s and ~10 s (≈27 s of
+// heat "in flight"); idle loss needs ~5.6 % duty at 94.5 °C. Tv ≈ that lag
+// lets D cut the heater before the in-flight heat overshoots. Simulated cold
+// start: ~2 °C overshoot vs the measured ~10 °C with Kp 31.5 / Tn 75 / Tv 1.8.
+// Equivalent Tn/Tv: Kp 18, Tn 90 s, Tv 22 s.
+constexpr float         kKp             = 18.0F;
+constexpr float         kKi             = 0.2F;    // Kp / Tn
+constexpr float         kKd             = 396.0F;  // Kp * Tv
 constexpr float         kOutputMin      = 0.0F;
 constexpr float         kOutputMax      = 100.0F;
-constexpr float         kIntegralMin    = -50.0F;
-constexpr float         kIntegralMax    = 50.0F;
+// The integral only ever has to supply the holding duty: measured loss needs
+// ~5.6 % at 94.5 °C and ~8.4 % at a 130 °C steam setpoint. The old ±50 clamp
+// let it wind to +50 % during the final approach of a cold start, which the
+// 2026-09-22 log showed delaying heater cut-off from ~83 °C to ~88 °C and
+// adding ~2.2 °C of the 4.3 °C overshoot. Keep it just above what holding
+// actually needs, so P and D decide the approach.
+constexpr float         kIntegralMin    = -10.0F;
+constexpr float         kIntegralMax    = 15.0F;
 constexpr float         kSamplePeriodS  = 0.2F;   // 5 Hz loop
 // First-order low-pass on dT/dt feeding the D term. The TSIC LSB is
 // ~0.098 °C, so at 5 Hz one LSB flicker reads as ±0.49 °C/s; unfiltered,
