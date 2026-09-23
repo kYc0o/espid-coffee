@@ -1907,11 +1907,101 @@ void control_task(void* arg) {
 
         g_control_duty_pct.store(duty_pct, std::memory_order_relaxed);
 
-        if ((++log_div % 10U) == 0U) {
-            ESP_LOGI(kTag, "control: duty=%.1f%% sp=%.1fC steam=%d fresh=%d estop=%d serr=%" PRIu32,
-                     static_cast<double>(duty_pct),
+        {
+            const auto& t = controller.last_terms();
+            g_control.setpoint_c.store(active_setpoint_c, std::memory_order_relaxed);
+            g_control.error_c.store(active_setpoint_c - temp_c, std::memory_order_relaxed);
+            g_control.slope_cps.store(t.slope, std::memory_order_relaxed);
+            g_control.p_term.store(t.p, std::memory_order_relaxed);
+            g_control.i_term.store(t.i, std::memory_order_relaxed);
+            g_control.d_term.store(t.d, std::memory_order_relaxed);
+            g_control.unclamped.store(t.unclamped, std::memory_order_relaxed);
+            g_control.kp.store(pcfg.kp, std::memory_order_relaxed);
+            g_control.ki.store(pcfg.ki, std::memory_order_relaxed);
+            g_control.kd.store(pcfg.kd, std::memory_order_relaxed);
+            g_control.phase.store(static_cast<std::uint8_t>(phase), std::memory_order_relaxed);
+            g_control.feed_forward.store(brew_pulse, std::memory_order_relaxed);
+            g_control.valid.store(sample_fresh, std::memory_order_release);
+        }
+
+        if (phase_tracker.changed()) {
+            ESP_LOGI(kTag,
+                     "heat phase %s->%s: Kp=%.2f Tn=%.1fs Tv=%.2fs "
+                     "(ki=%.4f kd=%.2f) sp=%.2fC T=%.2fC I=%.2f",
+                     espid::pid::to_string(phase_tracker.previous()),
+                     espid::pid::to_string(phase),
+                     static_cast<double>(kp), static_cast<double>(tn_s),
+                     static_cast<double>(tv_s), static_cast<double>(pcfg.ki),
+                     static_cast<double>(pcfg.kd),
                      static_cast<double>(active_setpoint_c),
-                     steam_active ? 1 : 0,
+                     static_cast<double>(temp_c),
+                     static_cast<double>(controller.integral_state()));
+
+            const bool was_brew_window =
+                espid::pid::HeaterPhaseTracker::uses_brew_gains(phase_tracker.previous());
+            if (phase == espid::pid::HeaterPhase::kBrew && !shot_stats.active()) {
+                shot_stats.begin(now_ms, active_setpoint_c, temp_c,
+                                 cfg::pid::kShotSettleBandC);
+            } else if (was_brew_window && !brew_gains && shot_stats.active()) {
+                const auto r = shot_stats.finish();
+                ESP_LOGI(kTag,
+                         "heat shot: brew=%.1fs window=%.1fs sp=%.2fC T0=%.2fC "
+                         "Tmin=%.2fC@%.1fs drop=%.2fC Tmax=%.2fC over=%+.2fC "
+                         "settle(+-%.1fC)=%.1fs%s duty_brew=%.1f%% duty_trail=%.1f%%",
+                         static_cast<double>(r.brew_ms) / 1000.0,
+                         static_cast<double>(r.window_ms) / 1000.0,
+                         static_cast<double>(r.setpoint_c),
+                         static_cast<double>(r.start_temp_c),
+                         static_cast<double>(r.min_temp_c),
+                         static_cast<double>(r.min_at_ms) / 1000.0,
+                         static_cast<double>(r.drop_c()),
+                         static_cast<double>(r.max_after_min_c),
+                         static_cast<double>(r.overshoot_c()),
+                         static_cast<double>(cfg::pid::kShotSettleBandC),
+                         static_cast<double>(r.settled_at_ms) / 1000.0,
+                         r.settled ? "" : " (NOT settled: raise trailing time)",
+                         static_cast<double>(r.avg_duty_brew),
+                         static_cast<double>(r.avg_duty_trail));
+
+                g_shot_summary.setpoint_c.store(r.setpoint_c, std::memory_order_relaxed);
+                g_shot_summary.start_temp_c.store(r.start_temp_c, std::memory_order_relaxed);
+                g_shot_summary.min_temp_c.store(r.min_temp_c, std::memory_order_relaxed);
+                g_shot_summary.max_after_min_c.store(r.max_after_min_c, std::memory_order_relaxed);
+                g_shot_summary.min_at_ms.store(r.min_at_ms, std::memory_order_relaxed);
+                g_shot_summary.brew_ms.store(r.brew_ms, std::memory_order_relaxed);
+                g_shot_summary.window_ms.store(r.window_ms, std::memory_order_relaxed);
+                g_shot_summary.settled_at_ms.store(r.settled_at_ms, std::memory_order_relaxed);
+                g_shot_summary.settled.store(r.settled, std::memory_order_relaxed);
+                g_shot_summary.avg_duty_brew.store(r.avg_duty_brew, std::memory_order_relaxed);
+                g_shot_summary.avg_duty_trail.store(r.avg_duty_trail, std::memory_order_relaxed);
+                g_shot_summary.seq.fetch_add(1, std::memory_order_release);
+            }
+        }
+        if (shot_stats.active() && sample_fresh) {
+            shot_stats.sample(now_ms, temp_c, duty_pct, shot_running);
+        }
+
+        const std::uint32_t log_every = brew_gains ? cfg::pid::kLogEveryStepsBrew
+                                                   : cfg::pid::kLogEveryStepsIdle;
+        if (phase_tracker.changed() || (++log_div >= log_every)) {
+            log_div = 0;
+            const auto& t = controller.last_terms();
+            ESP_LOGI(kTag,
+                     "heat ph=%s t=%.1f T=%.2f sp=%.2f e=%+.2f dTdt=%+.3f "
+                     "P=%+.1f I=%+.1f D=%+.1f u=%+.1f duty=%.1f "
+                     "ff=%d fresh=%d estop=%d serr=%" PRIu32,
+                     espid::pid::to_string(phase),
+                     static_cast<double>(now_ms - phase_tracker.entered_ms()) / 1000.0,
+                     static_cast<double>(temp_c),
+                     static_cast<double>(active_setpoint_c),
+                     static_cast<double>(active_setpoint_c - temp_c),
+                     static_cast<double>(t.slope),
+                     static_cast<double>(t.p),
+                     static_cast<double>(t.i),
+                     static_cast<double>(t.d),
+                     static_cast<double>(t.unclamped),
+                     static_cast<double>(duty_pct),
+                     brew_pulse ? 1 : 0,
                      sample_fresh ? 1 : 0,
                      emergency_stop ? 1 : 0,
                      g_sensor_consecutive_errors.load(std::memory_order_relaxed));
