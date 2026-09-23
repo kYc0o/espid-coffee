@@ -85,6 +85,7 @@ add_executable(espid_unit_tests
     test_tsic306_decoder.cpp
     test_abp2_decoder.cpp
     test_pid.cpp
+    test_heater_pid_phase.cpp
     test_brew.cpp
     test_heater.cpp
     test_psm.cpp
