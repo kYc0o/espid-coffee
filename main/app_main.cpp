@@ -1608,6 +1608,19 @@ void mqtt_task(void* /*arg*/) {
         std::uint64_t next_pressure_publish_ms = 0;
         std::uint64_t next_runtime_check_ms = 0;
         bool prev_shot_running = false;
+        bool prev_steam_active = g_steam_active.load(std::memory_order_relaxed);
+        std::uint64_t steam_started_ms = 0;
+        std::uint32_t last_summary_seq =
+            g_shot_summary.seq.load(std::memory_order_acquire);
+
+        espid::pid::TelemetryPolicy::Config tcfg{};
+        tcfg.warmup_ms        = cfg::mqtt::kWarmupPublishWindowMs;
+        tcfg.warmup_period_ms = cfg::mqtt::kWarmupPublishPeriodMs;
+        tcfg.brew_period_ms   = cfg::mqtt::kBrewPublishPeriodMs;
+        tcfg.active_period_ms = cfg::mqtt::kActivePublishPeriodMs;
+        tcfg.idle_period_ms   = cfg::mqtt::kIdlePublishPeriodMs;
+        tcfg.settle_band_c    = cfg::mqtt::kActivePublishBandC;
+        tcfg.active_slope_cps = cfg::mqtt::kActivePublishSlopeCps;
 
         const auto publish_payload = [&](const char* msg) {
             const int msg_id = esp_mqtt_client_publish(
@@ -1638,8 +1651,9 @@ void mqtt_task(void* /*arg*/) {
                 const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
                 const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
                 const int en = std::snprintf(payload, sizeof(payload),
-                    "{\"type\":\"brew_start\",\"uptime_ms\":%" PRIu64
+                    "{\"type\":\"brew_start\",\"rec\":%u,\"uptime_ms\":%" PRIu64
                     ",\"temp_c\":%.2f,\"pressure_bar\":%.3f}",
+                    static_cast<unsigned>(cfg::mqtt::RecordType::kBrewStart),
                     now_ms,
                     static_cast<double>(temp_c),
                     static_cast<double>(p));
@@ -1652,8 +1666,9 @@ void mqtt_task(void* /*arg*/) {
                 const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
                 const std::uint32_t shot_ms = g_shot.elapsed_ms.load(std::memory_order_relaxed);
                 const int en = std::snprintf(payload, sizeof(payload),
-                    "{\"type\":\"brew_stop\",\"uptime_ms\":%" PRIu64
+                    "{\"type\":\"brew_stop\",\"rec\":%u,\"uptime_ms\":%" PRIu64
                     ",\"duration_s\":%.1f,\"temp_c\":%.2f,\"pressure_bar\":%.3f}",
+                    static_cast<unsigned>(cfg::mqtt::RecordType::kBrewStop),
                     now_ms,
                     static_cast<double>(shot_ms) / 1000.0,
                     static_cast<double>(temp_c),
@@ -1664,6 +1679,48 @@ void mqtt_task(void* /*arg*/) {
             }
             prev_shot_running = shot_running;
 
+            // Steam switch edges: the heater runs to a different setpoint with
+            // its own over-temp guard, so analysis has to segment on these.
+            const bool steam_active =
+                g_steam_active.load(std::memory_order_relaxed);
+            if (steam_active != prev_steam_active) {
+                const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
+                const float setpoint_c =
+                    g_control.setpoint_c.load(std::memory_order_relaxed);
+                const float duty_pct =
+                    g_control_duty_pct.load(std::memory_order_relaxed);
+                int en = 0;
+                if (steam_active) {
+                    steam_started_ms = now_ms;
+                    en = std::snprintf(payload, sizeof(payload),
+                        "{\"type\":\"steam_on\",\"rec\":%u,\"steam\":1,\"uptime_ms\":%" PRIu64
+                        ",\"temp_c\":%.2f,\"setpoint_c\":%.2f,\"heater_duty_pct\":%.1f}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kSteamOn),
+                        now_ms,
+                        static_cast<double>(temp_c),
+                        static_cast<double>(setpoint_c),
+                        static_cast<double>(duty_pct));
+                } else {
+                    const double steam_s =
+                        (steam_started_ms > 0 && now_ms >= steam_started_ms)
+                            ? static_cast<double>(now_ms - steam_started_ms) / 1000.0
+                            : 0.0;
+                    en = std::snprintf(payload, sizeof(payload),
+                        "{\"type\":\"steam_off\",\"rec\":%u,\"steam\":0,\"uptime_ms\":%" PRIu64
+                        ",\"duration_s\":%.1f,\"temp_c\":%.2f"
+                        ",\"setpoint_c\":%.2f,\"heater_duty_pct\":%.1f}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kSteamOff),
+                        now_ms, steam_s,
+                        static_cast<double>(temp_c),
+                        static_cast<double>(setpoint_c),
+                        static_cast<double>(duty_pct));
+                }
+                if (en > 0 && static_cast<std::size_t>(en) < sizeof(payload) && mqtt_connected) {
+                    publish_payload(payload);
+                }
+                prev_steam_active = steam_active;
+            }
+
             if (mqtt_connected) {
                 if (now_ms >= next_temp_publish_ms) {
                     const bool temp_valid =
@@ -1672,27 +1729,103 @@ void mqtt_task(void* /*arg*/) {
                         g_snapshot.temp_c.load(std::memory_order_relaxed);
                     const float duty_pct =
                         g_control_duty_pct.load(std::memory_order_relaxed);
+                    const auto phase = static_cast<espid::pid::HeaterPhase>(
+                        g_control.phase.load(std::memory_order_relaxed));
+                    const float setpoint_c =
+                        g_control.setpoint_c.load(std::memory_order_relaxed);
+                    const float error_c =
+                        g_control.error_c.load(std::memory_order_relaxed);
+                    const float slope_cps =
+                        g_control.slope_cps.load(std::memory_order_relaxed);
+                    const float pressure_bar =
+                        g_pressure.pressure_bar.load(std::memory_order_relaxed);
+                    const std::uint32_t shot_ms =
+                        g_shot.elapsed_ms.load(std::memory_order_relaxed);
 
+                    // Everything needed to replay the loop offline: inputs,
+                    // the P/I/D split, the gains in force, and the phase they
+                    // belong to (gains switch between idle and brew sets).
                     const int n = std::snprintf(
                         payload, sizeof(payload),
-                        "{\"type\":\"temperature\",\"uptime_ms\":%" PRIu64
+                        "{\"type\":\"temperature\",\"rec\":%u,\"uptime_ms\":%" PRIu64
+                        ",\"phase\":\"%s\",\"phase_id\":%u"
                         ",\"temp_c\":%.2f,\"temp_valid\":%u"
-                        ",\"heater_duty_pct\":%.1f,\"brewing\":%u}",
+                        ",\"setpoint_c\":%.2f,\"error_c\":%.2f,\"slope_cps\":%.3f"
+                        ",\"heater_duty_pct\":%.1f,\"p\":%.1f,\"i\":%.1f,\"d\":%.1f"
+                        ",\"u\":%.1f,\"kp\":%.2f,\"ki\":%.4f,\"kd\":%.1f"
+                        ",\"ff\":%u,\"steam\":%u,\"estop\":%u,\"brewing\":%u"
+                        ",\"shot_s\":%.1f,\"pressure_bar\":%.3f,\"pump_pct\":%.1f}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kTemperature),
                         now_ms,
+                        espid::pid::to_string(phase),
+                        static_cast<unsigned>(phase),
                         static_cast<double>(temp_c),
                         temp_valid ? 1U : 0U,
+                        static_cast<double>(setpoint_c),
+                        static_cast<double>(error_c),
+                        static_cast<double>(slope_cps),
                         static_cast<double>(duty_pct),
-                        shot_running ? 1U : 0U);
+                        static_cast<double>(g_control.p_term.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control.i_term.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control.d_term.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control.unclamped.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control.kp.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control.ki.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control.kd.load(std::memory_order_relaxed)),
+                        g_control.feed_forward.load(std::memory_order_relaxed) ? 1U : 0U,
+                        g_steam_active.load(std::memory_order_relaxed) ? 1U : 0U,
+                        g_emergency_stop.load(std::memory_order_relaxed) ? 1U : 0U,
+                        shot_running ? 1U : 0U,
+                        static_cast<double>(shot_ms) / 1000.0,
+                        static_cast<double>(pressure_bar),
+                        static_cast<double>(g_pump_power_pct.load(std::memory_order_relaxed)));
 
                     if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
                         publish_payload(payload);
                     }
 
-                    const std::uint64_t next_period =
-                        shot_running
-                            ? static_cast<std::uint64_t>(cfg::mqtt::kTemperatureBrewPublishPeriodMs)
-                            : static_cast<std::uint64_t>(cfg::mqtt::kTemperaturePublishPeriodMs);
-                    next_temp_publish_ms = now_ms + next_period;
+                    next_temp_publish_ms =
+                        now_ms + espid::pid::TelemetryPolicy::period_ms(
+                                     tcfg, now_ms, phase, error_c, slope_cps);
+                }
+
+                // Per-shot thermal summary, emitted once the trailing phase
+                // closes the window in control_task.
+                const std::uint32_t summary_seq =
+                    g_shot_summary.seq.load(std::memory_order_acquire);
+                if (summary_seq != last_summary_seq) {
+                    const float sp = g_shot_summary.setpoint_c.load(std::memory_order_relaxed);
+                    const float tmin = g_shot_summary.min_temp_c.load(std::memory_order_relaxed);
+                    const float tmax = g_shot_summary.max_after_min_c.load(std::memory_order_relaxed);
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"shot_summary\",\"rec\":%u,\"uptime_ms\":%" PRIu64
+                        ",\"setpoint_c\":%.2f,\"start_temp_c\":%.2f"
+                        ",\"min_temp_c\":%.2f,\"drop_c\":%.2f,\"min_at_s\":%.1f"
+                        ",\"max_after_min_c\":%.2f,\"overshoot_c\":%.2f"
+                        ",\"brew_s\":%.1f,\"window_s\":%.1f,\"settled\":%u"
+                        ",\"settled_at_s\":%.1f,\"duty_brew_pct\":%.1f"
+                        ",\"duty_trail_pct\":%.1f}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kShotSummary),
+                        now_ms,
+                        static_cast<double>(sp),
+                        static_cast<double>(g_shot_summary.start_temp_c.load(std::memory_order_relaxed)),
+                        static_cast<double>(tmin),
+                        static_cast<double>(sp - tmin),
+                        static_cast<double>(g_shot_summary.min_at_ms.load(std::memory_order_relaxed)) / 1000.0,
+                        static_cast<double>(tmax),
+                        static_cast<double>(tmax - sp),
+                        static_cast<double>(g_shot_summary.brew_ms.load(std::memory_order_relaxed)) / 1000.0,
+                        static_cast<double>(g_shot_summary.window_ms.load(std::memory_order_relaxed)) / 1000.0,
+                        g_shot_summary.settled.load(std::memory_order_relaxed) ? 1U : 0U,
+                        static_cast<double>(g_shot_summary.settled_at_ms.load(std::memory_order_relaxed)) / 1000.0,
+                        static_cast<double>(g_shot_summary.avg_duty_brew.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_shot_summary.avg_duty_trail.load(std::memory_order_relaxed)));
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload) &&
+                        summary_seq == g_shot_summary.seq.load(std::memory_order_acquire)) {
+                        publish_payload(payload);
+                        last_summary_seq = summary_seq;
+                    }
                 }
 
                 if (shot_running && now_ms >= next_pressure_publish_ms) {
@@ -1707,9 +1840,10 @@ void mqtt_task(void* /*arg*/) {
 
                     const int n = std::snprintf(
                         payload, sizeof(payload),
-                        "{\"type\":\"pressure\",\"uptime_ms\":%" PRIu64
+                        "{\"type\":\"pressure\",\"rec\":%u,\"uptime_ms\":%" PRIu64
                         ",\"shot_s\":%.1f,\"pressure_bar\":%.3f"
                         ",\"pressure_valid\":%u,\"pressure_stale\":%u}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kPressure),
                         now_ms,
                         static_cast<double>(shot_ms) / 1000.0,
                         static_cast<double>(pressure_bar),
@@ -2178,6 +2312,7 @@ void pump_task(void* arg) {
              static_cast<unsigned>(cfg::pump::kStartupFillTimeoutMs / 1000U));
 
     (void)ctx->psm->set_power_pct(cfg::pump::kStartupFillPowerPct);
+    g_pump_power_pct.store(cfg::pump::kStartupFillPowerPct, std::memory_order_relaxed);
     // Valve stays CLOSED during fill: pump pushes into boiler via check valve.
     // Opening the solenoid routes water to group head and prevents pressure build.
     const std::uint64_t fill_deadline_ms =
@@ -2210,6 +2345,7 @@ void pump_task(void* arg) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     (void)ctx->psm->set_power_pct(0.0F);
+    g_pump_power_pct.store(0.0F, std::memory_order_relaxed);
     ESP_LOGI(kTag, "pump: fill end — zc_count=%u", ctx->psm->zc_count());
     g_fill_ok.store(fill_ok, std::memory_order_release);
     g_fill_complete.store(true, std::memory_order_release);
@@ -2263,11 +2399,13 @@ void pump_task(void* arg) {
             } else {
                 // No pressure reading yet — run at full power as fallback.
                 (void)ctx->psm->set_power_pct(cfg::pump::kDefaultPowerPct);
+                g_pump_power_pct.store(cfg::pump::kDefaultPowerPct, std::memory_order_relaxed);
             }
         } else {
             was_brewing = false;
             pid.reset();
             (void)ctx->psm->set_power_pct(0.0F);
+            g_pump_power_pct.store(0.0F, std::memory_order_relaxed);
         }
         vTaskDelay(period);
     }
@@ -2464,7 +2602,14 @@ void steam_task(void* /*arg*/) {
         const bool active = sw.is_pressed();
         if (active != last) {
             g_steam_active.store(active, std::memory_order_relaxed);
-            ESP_LOGI(kTag, "steam: %s", active ? "ON" : "OFF");
+            const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
+            const float setpoint_c =
+                active ? g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed)
+                       : g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
+            ESP_LOGI(kTag, "steam: %s T=%.2fC sp=%.2fC",
+                     active ? "ON" : "OFF",
+                     static_cast<double>(temp_c),
+                     static_cast<double>(setpoint_c));
             last = active;
         }
 

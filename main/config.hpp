@@ -382,9 +382,32 @@ constexpr std::size_t   kPasswordMaxLen = 64;
 constexpr std::size_t   kClientIdMaxLen = 64;
 constexpr std::size_t   kUriMaxLen      = 96;
 constexpr std::size_t   kTopicMaxLen    = 96;
-constexpr std::size_t   kPayloadMaxLen  = 256;
-constexpr std::uint32_t kTemperaturePublishPeriodMs = 10'000;  // 10 s idle; 2 s during brew
-constexpr std::uint32_t kTemperatureBrewPublishPeriodMs = 2'000;
+constexpr std::size_t   kPayloadMaxLen  = 448;  // full control record + slack
+// Numeric mirror of each record's "type" string. The Hono->Kafka->Telegraf
+// pipeline's JSON parser keeps numeric fields and drops strings that are not
+// declared as tags, so the strings stay for human/MQTT consumers while these
+// codes are what actually lands in TimescaleDB. `phase` is mirrored the same
+// way by publishing pid::HeaterPhase's value as "phase_id".
+enum class RecordType : std::uint8_t {
+    kTemperature = 1,
+    kPressure    = 2,
+    kBrewStart   = 3,
+    kBrewStop    = 4,
+    kSteamOn     = 5,
+    kSteamOff    = 6,
+    kShotSummary = 7,
+};
+// Telemetry cadence (see pid::TelemetryPolicy). Transients are what PID
+// tuning needs, so the rate follows the heater phase rather than a fixed
+// period: fast while warming up, brewing, steaming or off setpoint, and a
+// slow heartbeat once the boiler is parked at setpoint.
+constexpr std::uint32_t kWarmupPublishWindowMs   = 600'000;  // 10 min after boot
+constexpr std::uint32_t kWarmupPublishPeriodMs   = 1'000;
+constexpr std::uint32_t kBrewPublishPeriodMs     = 500;   // brew + trailing
+constexpr std::uint32_t kActivePublishPeriodMs   = 1'000;  // steam / off-setpoint
+constexpr std::uint32_t kIdlePublishPeriodMs     = 10'000;  // settled heartbeat
+constexpr float         kActivePublishBandC      = 0.5F;
+constexpr float         kActivePublishSlopeCps   = 0.05F;
 constexpr std::uint32_t kPressurePublishPeriodMs = 500;
 constexpr std::uint32_t kRuntimeSettingsCheckPeriodMs = 1000;
 constexpr std::uint32_t kSchedulerPeriodMs = 100;
