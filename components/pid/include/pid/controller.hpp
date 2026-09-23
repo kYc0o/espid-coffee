@@ -16,6 +16,11 @@
 //     filter keeps the D term from amplifying that noise. 0 = unfiltered.
 //   - Integral anti-windup via fixed clamps (`integral_min/max`). The
 //     output is independently clamped to `output_min/max`.
+//   - Optional conditional integration (`conditional_integration`): the
+//     integrator holds while the output is saturated in the direction the
+//     error is pushing. Without it a long saturated run (e.g. boiler cold
+//     start at 100 %) parks the integral at its clamp and it has to unwind
+//     through an overshoot.
 //   - The integrator stores the already-`ki`-scaled sum, so swapping
 //     gains with `set_config()` mid-run is bumpless. `ki == 0` freezes
 //     the integral at its current contribution.
@@ -38,6 +43,7 @@ class Controller {
         float integral_max    =  1.0F;
         float sample_period_s = 0.1F;  // 10 Hz default
         float d_filter_tau_s  = 0.0F;  // slope low-pass time constant; 0 = off
+        bool  conditional_integration = false;
     };
 
     // Per-term breakdown of the most recent `update()`, for diagnostics.
@@ -72,9 +78,9 @@ class Controller {
         const float error = setpoint - measurement;
 
         // Integral with clamp anti-windup.
-        integral_ += cfg_.ki * error * cfg_.sample_period_s;
-        if (integral_ > cfg_.integral_max) integral_ = cfg_.integral_max;
-        if (integral_ < cfg_.integral_min) integral_ = cfg_.integral_min;
+        float integral = integral_ + cfg_.ki * error * cfg_.sample_period_s;
+        if (integral > cfg_.integral_max) integral = cfg_.integral_max;
+        if (integral < cfg_.integral_min) integral = cfg_.integral_min;
 
         // Derivative on measurement: rejects setpoint-step kicks.
         float d_term = 0.0F;
@@ -94,7 +100,14 @@ class Controller {
         has_last_         = true;
 
         const float p_term = cfg_.kp * error;
-        float out = p_term + integral_ + d_term;
+        float out = p_term + integral + d_term;
+        if (cfg_.conditional_integration &&
+            ((out > cfg_.output_max && error > 0.0F) ||
+             (out < cfg_.output_min && error < 0.0F))) {
+            integral = integral_;
+            out      = p_term + integral + d_term;
+        }
+        integral_ = integral;
         terms_.p         = p_term;
         terms_.i         = integral_;
         terms_.d         = d_term;

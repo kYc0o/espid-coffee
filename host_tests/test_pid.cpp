@@ -249,4 +249,54 @@ TEST(PidController, GainSwapIsBumplessAndZeroKiFreezesIntegral) {
     EXPECT_FLOAT_EQ(pid.integral_state(), 3.0F);
 }
 
+TEST(PidController, ConditionalIntegrationHoldsWhileSaturated) {
+    Controller::Config c{};
+    c.kp                      = 10.0F;
+    c.ki                      = 1.0F;
+    c.output_min              = 0.0F;
+    c.output_max              = 100.0F;
+    c.integral_min            = -50.0F;
+    c.integral_max            =  50.0F;
+    c.sample_period_s         = 1.0F;
+    c.conditional_integration = true;
+    Controller pid(c);
+
+    // Cold start: error 70 saturates the output high; integral must not grow.
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_FLOAT_EQ(pid.update(94.0F, 24.0F), 100.0F);
+    }
+    EXPECT_FLOAT_EQ(pid.integral_state(), 0.0F);
+
+    // Unsaturated: integrates normally.
+    EXPECT_FLOAT_EQ(pid.update(94.0F, 93.0F), 11.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 1.0F);
+
+    // Saturated low with negative error: holds as well.
+    EXPECT_FLOAT_EQ(pid.update(94.0F, 104.0F), 0.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 1.0F);
+}
+
+TEST(PidController, ConditionalIntegrationStillUnwindsAgainstSaturation) {
+    Controller::Config c{};
+    c.kp                      = 10.0F;
+    c.ki                      = 1.0F;
+    c.output_min              = 0.0F;
+    c.output_max              = 100.0F;
+    c.integral_min            = -50.0F;
+    c.integral_max            =  50.0F;
+    c.sample_period_s         = 1.0F;
+    c.conditional_integration = true;
+    Controller pid(c);
+
+    for (int i = 0; i < 20; ++i) {
+        (void)pid.update(94.0F, 93.0F);  // build I = 20 while unsaturated
+    }
+    ASSERT_FLOAT_EQ(pid.integral_state(), 20.0F);
+    // Output saturated high but error negative: integration must proceed.
+    c.kp = -200.0F;  // force high saturation with negative error
+    pid.set_config(c);
+    (void)pid.update(94.0F, 94.5F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 19.5F);
+}
+
 }  // namespace
