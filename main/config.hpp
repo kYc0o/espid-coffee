@@ -123,7 +123,7 @@ constexpr std::uint32_t kPollPeriodMs     = 10;
 }  // namespace steam
 
 // ---------------------------------------------------------------------------
-// PID controller (stub — not yet wired to a heater)
+// Heater PID controller
 // ---------------------------------------------------------------------------
 namespace pid {
 constexpr float         kSetpointC      = 92.0F;
@@ -144,7 +144,10 @@ constexpr float         kOutputMax      = 100.0F;
 constexpr float         kIntegralMin    = -50.0F;
 constexpr float         kIntegralMax    = 50.0F;
 constexpr float         kSamplePeriodS  = 0.2F;   // 5 Hz loop
-constexpr float         kEmaFactor      = 0.6F;   // input smoothing for D term
+// First-order low-pass on dT/dt feeding the D term. The TSIC LSB is
+// ~0.098 °C, so at 5 Hz one LSB flicker reads as ±0.49 °C/s; unfiltered,
+// Kd = Kp*Tv turns that into a large duty spike.
+constexpr float         kDerivativeFilterTauS = 4.0F;
 constexpr std::uint32_t kTaskStackBytes = 4096;
 constexpr std::uint32_t kTaskPriority   = 5;
 constexpr std::int32_t  kTaskCore       = 1;
@@ -158,10 +161,35 @@ constexpr float         kSetpointMinC   = 70.0F;
 constexpr float         kSetpointMaxC   = 110.0F;
 constexpr float         kSteamSetpointMinC = 110.0F;
 constexpr float         kSteamSetpointMaxC = 170.0F;
-// Extra degrees added to setpoint while brewing to compensate for cold water.
-constexpr float         kBrewingBiasC      = 2.0F;
-constexpr float         kBrewingBiasMinC   = 0.0F;
-constexpr float         kBrewingBiasMaxC   = 20.0F;
+// Brew-phase gains: active while the shot runs and for kBrewTrailingS
+// afterwards. The heater lag (~27 s) is as long as a shot, so heat added in
+// response to the dip mostly lands after the pump stops: in simulation a
+// more aggressive set (Kp 50 / Tv 10) trimmed the dip by ~0.4 °C but nearly
+// doubled the post-shot overshoot. Default is the idle set with Tn = 0 to
+// freeze the integral (no windup from the dip, bumpless return).
+// Tune from the "heat shot:" console summaries.
+constexpr float         kBrewKp            = 18.0F;
+constexpr float         kBrewTnS           = 0.0F;   // 0 = integral frozen
+constexpr float         kBrewTvS           = 22.0F;
+// Feed-forward pulse: heater forced to kBrewPulseDutyPct for the first
+// kBrewPulseS of a shot, so that heat arrives while cold water is still
+// flowing. Simulated at ~1 ml/s: 8 s halves the dip (2.0 → 0.9 °C) and cuts
+// overshoot (2.9 → 1.6 °C). 0 = off.
+constexpr float         kBrewPulseS        = 0.0F;
+constexpr float         kBrewPulseMinS     = 0.0F;
+constexpr float         kBrewPulseMaxS     = 30.0F;
+constexpr float         kBrewPulseDutyPct  = 100.0F;
+constexpr float         kBrewTnMinS        = 0.0F;
+constexpr float         kBrewTrailingS     = 20.0F;
+constexpr float         kBrewTrailingMinS  = 0.0F;
+constexpr float         kBrewTrailingMaxS  = 120.0F;
+
+// Console diagnostics. One "heat" line every N control steps; brew/trailing
+// log every step so the dip and recovery are fully resolved.
+constexpr std::uint32_t kLogEveryStepsIdle  = 5;    // 1 Hz at 5 Hz loop
+constexpr std::uint32_t kLogEveryStepsBrew  = 1;    // 5 Hz
+// |T - setpoint| band used for the per-shot settling time.
+constexpr float         kShotSettleBandC    = 0.5F;
 }  // namespace pid
 
 // ---------------------------------------------------------------------------

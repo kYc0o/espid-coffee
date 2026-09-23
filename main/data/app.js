@@ -13,7 +13,8 @@
   // --- Pre-populate form fields from /api/settings ---
   var FIELDS = [
     'pid_kp', 'pid_tn', 'pid_tv',
-    'pump_kp', 'pump_ki', 'pump_kd', 'brew_bias',
+    'brew_kp', 'brew_tn', 'brew_tv', 'brew_trail', 'brew_pulse',
+    'pump_kp', 'pump_ki', 'pump_kd',
     'brew_sp', 'steam_sp',
     'brew_t', 'preinf_t', 'preinf_pause_t',
     'mqtt_host', 'mqtt_port',

@@ -35,6 +35,9 @@
 #include "hal_cpp/result.hpp"
 #include "heater/slow_pwm_ssr_heater.hpp"
 #include "pid/controller.hpp"
+#include "pid/heater_phase.hpp"
+#include "pid/telemetry_policy.hpp"
+#include "pid/shot_thermal_stats.hpp"
 #include "pump/psm_pump.hpp"
 #include "scale/hx711_scale.hpp"
 #include "scale/scale_core.hpp"
@@ -206,7 +209,11 @@ constexpr const char* kCfgPidTv = "pid_tv";
 constexpr const char* kCfgPumpKp = "pump_kp";
 constexpr const char* kCfgPumpKi = "pump_ki";
 constexpr const char* kCfgPumpKd = "pump_kd";
-constexpr const char* kCfgBrewingBias = "brew_bias";
+constexpr const char* kCfgBrewKp = "brew_kp";
+constexpr const char* kCfgBrewTn = "brew_tn";
+constexpr const char* kCfgBrewTv = "brew_tv";
+constexpr const char* kCfgBrewTrailing = "brew_trail";
+constexpr const char* kCfgBrewPulse = "brew_pulse";
 constexpr const char* kCfgHawkbitServer = "hb_server";
 constexpr const char* kCfgHawkbitToken  = "hb_token";
 constexpr const char* kCfgBrewSetpoint = "brew_sp";
@@ -240,11 +247,72 @@ struct RuntimeControlSettings {
     std::atomic<float> pump_kp{cfg::pump::kPidKp};
     std::atomic<float> pump_ki{cfg::pump::kPidKi};
     std::atomic<float> pump_kd{cfg::pump::kPidKd};
-    std::atomic<float> brewing_bias_c{cfg::pid::kBrewingBiasC};
+    std::atomic<float> brew_kp{cfg::pid::kBrewKp};
+    std::atomic<float> brew_tn_s{cfg::pid::kBrewTnS};
+    std::atomic<float> brew_tv_s{cfg::pid::kBrewTvS};
+    std::atomic<float> brew_trailing_s{cfg::pid::kBrewTrailingS};
+    std::atomic<float> brew_pulse_s{cfg::pid::kBrewPulseS};
+};
+
+// Plain-value mirror of RuntimeControlSettings for load/save paths.
+struct ControlSettingsValues {
+    float pid_kp          = cfg::pid::kKp;
+    float pid_tn_s        = default_pid_tn_seconds();
+    float pid_tv_s        = default_pid_tv_seconds();
+    float brew_setpoint_c = cfg::pid::kSetpointC;
+    float steam_setpoint_c = cfg::pid::kSteamSetpointC;
+    float pump_kp         = cfg::pump::kPidKp;
+    float pump_ki         = cfg::pump::kPidKi;
+    float pump_kd         = cfg::pump::kPidKd;
+    float brew_kp         = cfg::pid::kBrewKp;
+    float brew_tn_s       = cfg::pid::kBrewTnS;
+    float brew_tv_s       = cfg::pid::kBrewTvS;
+    float brew_trailing_s = cfg::pid::kBrewTrailingS;
+    float brew_pulse_s    = cfg::pid::kBrewPulseS;
 };
 
 RuntimeControlSettings g_runtime_control;
 std::atomic<float> g_control_duty_pct{0.0F};
+std::atomic<float> g_pump_power_pct{0.0F};
+
+// Heater-loop state published every control step for telemetry. Scalars
+// only; a torn read costs one slightly inconsistent telemetry record.
+struct ControlSnapshot {
+    std::atomic<float>         setpoint_c{0.0F};
+    std::atomic<float>         error_c{0.0F};
+    std::atomic<float>         slope_cps{0.0F};
+    std::atomic<float>         p_term{0.0F};
+    std::atomic<float>         i_term{0.0F};
+    std::atomic<float>         d_term{0.0F};
+    std::atomic<float>         unclamped{0.0F};
+    std::atomic<float>         kp{0.0F};
+    std::atomic<float>         ki{0.0F};
+    std::atomic<float>         kd{0.0F};
+    std::atomic<std::uint8_t>  phase{0};
+    std::atomic<bool>          feed_forward{false};
+    std::atomic<bool>          valid{false};
+};
+
+ControlSnapshot g_control;
+
+// Per-shot thermal summary handed to mqtt_task. `seq` is bumped after the
+// fields are written; the reader re-checks it to detect a torn record.
+struct ShotSummarySnapshot {
+    std::atomic<std::uint32_t> seq{0};
+    std::atomic<float>         setpoint_c{0.0F};
+    std::atomic<float>         start_temp_c{0.0F};
+    std::atomic<float>         min_temp_c{0.0F};
+    std::atomic<float>         max_after_min_c{0.0F};
+    std::atomic<std::uint32_t> min_at_ms{0};
+    std::atomic<std::uint32_t> brew_ms{0};
+    std::atomic<std::uint32_t> window_ms{0};
+    std::atomic<std::uint32_t> settled_at_ms{0};
+    std::atomic<bool>          settled{false};
+    std::atomic<float>         avg_duty_brew{0.0F};
+    std::atomic<float>         avg_duty_trail{0.0F};
+};
+
+ShotSummarySnapshot g_shot_summary;
 std::atomic<float> g_weight_g{0.0F};
 std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
@@ -509,24 +577,20 @@ void mqtt_event_handler(void* /*handler_args*/,
     }
 }
 
-void publish_runtime_control_settings(float pid_kp,
-                                      float pid_tn_s,
-                                      float pid_tv_s,
-                                      float brew_setpoint_c,
-                                      float steam_setpoint_c,
-                                      float pump_kp,
-                                      float pump_ki,
-                                      float pump_kd,
-                                      float brewing_bias_c) noexcept {
-    g_runtime_control.pid_kp.store(pid_kp, std::memory_order_relaxed);
-    g_runtime_control.pid_tn_s.store(pid_tn_s, std::memory_order_relaxed);
-    g_runtime_control.pid_tv_s.store(pid_tv_s, std::memory_order_relaxed);
-    g_runtime_control.brew_setpoint_c.store(brew_setpoint_c, std::memory_order_relaxed);
-    g_runtime_control.steam_setpoint_c.store(steam_setpoint_c, std::memory_order_relaxed);
-    g_runtime_control.pump_kp.store(pump_kp, std::memory_order_relaxed);
-    g_runtime_control.pump_ki.store(pump_ki, std::memory_order_relaxed);
-    g_runtime_control.pump_kd.store(pump_kd, std::memory_order_relaxed);
-    g_runtime_control.brewing_bias_c.store(brewing_bias_c, std::memory_order_relaxed);
+void publish_runtime_control_settings(const ControlSettingsValues& v) noexcept {
+    g_runtime_control.pid_kp.store(v.pid_kp, std::memory_order_relaxed);
+    g_runtime_control.pid_tn_s.store(v.pid_tn_s, std::memory_order_relaxed);
+    g_runtime_control.pid_tv_s.store(v.pid_tv_s, std::memory_order_relaxed);
+    g_runtime_control.brew_setpoint_c.store(v.brew_setpoint_c, std::memory_order_relaxed);
+    g_runtime_control.steam_setpoint_c.store(v.steam_setpoint_c, std::memory_order_relaxed);
+    g_runtime_control.pump_kp.store(v.pump_kp, std::memory_order_relaxed);
+    g_runtime_control.pump_ki.store(v.pump_ki, std::memory_order_relaxed);
+    g_runtime_control.pump_kd.store(v.pump_kd, std::memory_order_relaxed);
+    g_runtime_control.brew_kp.store(v.brew_kp, std::memory_order_relaxed);
+    g_runtime_control.brew_tn_s.store(v.brew_tn_s, std::memory_order_relaxed);
+    g_runtime_control.brew_tv_s.store(v.brew_tv_s, std::memory_order_relaxed);
+    g_runtime_control.brew_trailing_s.store(v.brew_trailing_s, std::memory_order_relaxed);
+    g_runtime_control.brew_pulse_s.store(v.brew_pulse_s, std::memory_order_relaxed);
 }
 
 bool save_sta_credentials_to_nvs(const char* ssid, const char* password) noexcept {
@@ -629,48 +693,33 @@ bool load_setting_from_nvs(const char* key, const char* fallback,
 }
 
 void load_runtime_control_settings_from_nvs() noexcept {
-    float pid_kp = cfg::pid::kKp;
-    float pid_tn = default_pid_tn_seconds();
-    float pid_tv = default_pid_tv_seconds();
-    float brew_sp = cfg::pid::kSetpointC;
-    float steam_sp = cfg::pid::kSteamSetpointC;
-    float pump_kp = cfg::pump::kPidKp;
-    float pump_ki = cfg::pump::kPidKi;
-    float pump_kd = cfg::pump::kPidKd;
-    float brewing_bias_c = cfg::pid::kBrewingBiasC;
+    ControlSettingsValues v{};
 
-    char value[32];
-    if (load_setting_from_nvs(kCfgPidKp, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, cfg::pid::kKpMin, cfg::pid::kKpMax, &pid_kp);
-    }
-    if (load_setting_from_nvs(kCfgPidTn, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, cfg::pid::kTnMinS, cfg::pid::kTnMaxS, &pid_tn);
-    }
-    if (load_setting_from_nvs(kCfgPidTv, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &pid_tv);
-    }
-    if (load_setting_from_nvs(kCfgBrewSetpoint, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, cfg::pid::kSetpointMinC, cfg::pid::kSetpointMaxC, &brew_sp);
-    }
-    if (load_setting_from_nvs(kCfgSteamSetpoint, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, cfg::pid::kSteamSetpointMinC, cfg::pid::kSteamSetpointMaxC, &steam_sp);
-    }
-    if (load_setting_from_nvs(kCfgPumpKp, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, 0.0F, 100.0F, &pump_kp);
-    }
-    if (load_setting_from_nvs(kCfgPumpKi, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, 0.0F, 10.0F, &pump_ki);
-    }
-    if (load_setting_from_nvs(kCfgPumpKd, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, 0.0F, 50.0F, &pump_kd);
-    }
-    if (load_setting_from_nvs(kCfgBrewingBias, nullptr, value, sizeof(value))) {
-        (void)parse_float_in_range(value, cfg::pid::kBrewingBiasMinC,
-                                   cfg::pid::kBrewingBiasMaxC, &brewing_bias_c);
-    }
+    const auto load = [](const char* key, float min, float max, float* out) {
+        char value[32];
+        if (load_setting_from_nvs(key, nullptr, value, sizeof(value))) {
+            (void)parse_float_in_range(value, min, max, out);
+        }
+    };
+    load(kCfgPidKp, cfg::pid::kKpMin, cfg::pid::kKpMax, &v.pid_kp);
+    load(kCfgPidTn, cfg::pid::kTnMinS, cfg::pid::kTnMaxS, &v.pid_tn_s);
+    load(kCfgPidTv, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &v.pid_tv_s);
+    load(kCfgBrewSetpoint, cfg::pid::kSetpointMinC, cfg::pid::kSetpointMaxC,
+         &v.brew_setpoint_c);
+    load(kCfgSteamSetpoint, cfg::pid::kSteamSetpointMinC, cfg::pid::kSteamSetpointMaxC,
+         &v.steam_setpoint_c);
+    load(kCfgPumpKp, 0.0F, 100.0F, &v.pump_kp);
+    load(kCfgPumpKi, 0.0F, 10.0F, &v.pump_ki);
+    load(kCfgPumpKd, 0.0F, 50.0F, &v.pump_kd);
+    load(kCfgBrewKp, cfg::pid::kKpMin, cfg::pid::kKpMax, &v.brew_kp);
+    load(kCfgBrewTn, cfg::pid::kBrewTnMinS, cfg::pid::kTnMaxS, &v.brew_tn_s);
+    load(kCfgBrewTv, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &v.brew_tv_s);
+    load(kCfgBrewTrailing, cfg::pid::kBrewTrailingMinS, cfg::pid::kBrewTrailingMaxS,
+         &v.brew_trailing_s);
+    load(kCfgBrewPulse, cfg::pid::kBrewPulseMinS, cfg::pid::kBrewPulseMaxS,
+         &v.brew_pulse_s);
 
-    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp,
-                                     pump_kp, pump_ki, pump_kd, brewing_bias_c);
+    publish_runtime_control_settings(v);
 }
 
 void restart_task(void* /*arg*/) {
@@ -723,7 +772,11 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     char pump_kp[16];
     char pump_ki[16];
     char pump_kd[16];
-    char brew_bias[16];
+    char brew_kp[16];
+    char brew_tn[16];
+    char brew_tv[16];
+    char brew_trail[16];
+    char brew_pulse[16];
     char brew_t[16];
     char preinf_t[16];
     char preinf_pause_t[16];
@@ -744,7 +797,11 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     char pump_kp_default[16];
     char pump_ki_default[16];
     char pump_kd_default[16];
-    char brew_bias_default[16];
+    char brew_kp_default[16];
+    char brew_tn_default[16];
+    char brew_tv_default[16];
+    char brew_trail_default[16];
+    char brew_pulse_default[16];
     char brew_sp_default[16];
     char steam_sp_default[16];
     char brew_t_default[16];
@@ -764,8 +821,16 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
                   static_cast<double>(cfg::pump::kPidKi));
     std::snprintf(pump_kd_default, sizeof(pump_kd_default), "%.3f",
                   static_cast<double>(cfg::pump::kPidKd));
-    std::snprintf(brew_bias_default, sizeof(brew_bias_default), "%.1f",
-                  static_cast<double>(cfg::pid::kBrewingBiasC));
+    std::snprintf(brew_kp_default, sizeof(brew_kp_default), "%.2f",
+                  static_cast<double>(cfg::pid::kBrewKp));
+    std::snprintf(brew_tn_default, sizeof(brew_tn_default), "%.2f",
+                  static_cast<double>(cfg::pid::kBrewTnS));
+    std::snprintf(brew_tv_default, sizeof(brew_tv_default), "%.2f",
+                  static_cast<double>(cfg::pid::kBrewTvS));
+    std::snprintf(brew_trail_default, sizeof(brew_trail_default), "%.1f",
+                  static_cast<double>(cfg::pid::kBrewTrailingS));
+    std::snprintf(brew_pulse_default, sizeof(brew_pulse_default), "%.1f",
+                  static_cast<double>(cfg::pid::kBrewPulseS));
     std::snprintf(brew_sp_default, sizeof(brew_sp_default), "%.2f",
                   static_cast<double>(cfg::pid::kSetpointC));
     std::snprintf(steam_sp_default, sizeof(steam_sp_default), "%.2f",
@@ -785,7 +850,13 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     (void)load_setting_from_nvs(kCfgPumpKp, pump_kp_default, pump_kp, sizeof(pump_kp));
     (void)load_setting_from_nvs(kCfgPumpKi, pump_ki_default, pump_ki, sizeof(pump_ki));
     (void)load_setting_from_nvs(kCfgPumpKd, pump_kd_default, pump_kd, sizeof(pump_kd));
-    (void)load_setting_from_nvs(kCfgBrewingBias, brew_bias_default, brew_bias, sizeof(brew_bias));
+    (void)load_setting_from_nvs(kCfgBrewKp, brew_kp_default, brew_kp, sizeof(brew_kp));
+    (void)load_setting_from_nvs(kCfgBrewTn, brew_tn_default, brew_tn, sizeof(brew_tn));
+    (void)load_setting_from_nvs(kCfgBrewTv, brew_tv_default, brew_tv, sizeof(brew_tv));
+    (void)load_setting_from_nvs(kCfgBrewTrailing, brew_trail_default,
+                                brew_trail, sizeof(brew_trail));
+    (void)load_setting_from_nvs(kCfgBrewPulse, brew_pulse_default,
+                                brew_pulse, sizeof(brew_pulse));
     (void)load_setting_from_nvs(kCfgBrewSetpoint, brew_sp_default, brew_sp, sizeof(brew_sp));
     (void)load_setting_from_nvs(kCfgSteamSetpoint, steam_sp_default, steam_sp, sizeof(steam_sp));
     (void)load_setting_from_nvs(kCfgBrewTime, brew_t_default, brew_t, sizeof(brew_t));
@@ -808,12 +879,13 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
     (void)load_setting_from_nvs(kCfgHawkbitServer, "", hb_server, sizeof(hb_server));
     (void)load_setting_from_nvs(kCfgHawkbitToken,  "", hb_token,  sizeof(hb_token));
 
-    char json[1200];
+    char json[1536];
     const int n = std::snprintf(json, sizeof(json),
         "{\"ap_ssid\":\"%s\",\"wifi_ssid\":\"%s\","
         "\"pid_kp\":\"%s\",\"pid_tn\":\"%s\",\"pid_tv\":\"%s\","
         "\"pump_kp\":\"%s\",\"pump_ki\":\"%s\",\"pump_kd\":\"%s\","
-        "\"brew_bias\":\"%s\","
+        "\"brew_kp\":\"%s\",\"brew_tn\":\"%s\",\"brew_tv\":\"%s\","
+        "\"brew_trail\":\"%s\",\"brew_pulse\":\"%s\","
         "\"brew_sp\":\"%s\",\"steam_sp\":\"%s\","
         "\"brew_t\":\"%s\",\"preinf_t\":\"%s\",\"preinf_pause_t\":\"%s\","
         "\"mqtt_host\":\"%s\",\"mqtt_port\":\"%s\","
@@ -823,7 +895,7 @@ esp_err_t api_settings_get_handler(httpd_req_t* req) {
         g_saved_sta_ssid,
         pid_kp, pid_tn, pid_tv,
         pump_kp, pump_ki, pump_kd,
-        brew_bias,
+        brew_kp, brew_tn, brew_tv, brew_trail, brew_pulse,
         brew_sp, steam_sp,
         brew_t, preinf_t, preinf_pause_t,
         mqtt_host, mqtt_port, mqtt_user, mqtt_pass, mqtt_client,
@@ -952,7 +1024,11 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     char pump_kp_txt[16]{};
     char pump_ki_txt[16]{};
     char pump_kd_txt[16]{};
-    char brew_bias_txt[16]{};
+    char brew_kp_txt[16]{};
+    char brew_tn_txt[16]{};
+    char brew_tv_txt[16]{};
+    char brew_trail_txt[16]{};
+    char brew_pulse_txt[16]{};
     char brew_sp_txt[16]{};
     char steam_sp_txt[16]{};
     char brew_t_txt[16]{};
@@ -982,8 +1058,20 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     if (!form_field(body, "pump_kd", pump_kd_txt, sizeof(pump_kd_txt))) {
         return reject_bad_request("Missing pump_kd");
     }
-    if (!form_field(body, "brew_bias", brew_bias_txt, sizeof(brew_bias_txt))) {
-        return reject_bad_request("Missing brew_bias");
+    if (!form_field(body, "brew_kp", brew_kp_txt, sizeof(brew_kp_txt))) {
+        return reject_bad_request("Missing brew_kp");
+    }
+    if (!form_field(body, "brew_tn", brew_tn_txt, sizeof(brew_tn_txt))) {
+        return reject_bad_request("Missing brew_tn");
+    }
+    if (!form_field(body, "brew_tv", brew_tv_txt, sizeof(brew_tv_txt))) {
+        return reject_bad_request("Missing brew_tv");
+    }
+    if (!form_field(body, "brew_trail", brew_trail_txt, sizeof(brew_trail_txt))) {
+        return reject_bad_request("Missing brew_trail");
+    }
+    if (!form_field(body, "brew_pulse", brew_pulse_txt, sizeof(brew_pulse_txt))) {
+        return reject_bad_request("Missing brew_pulse");
     }
     if (!form_field(body, "brew_sp", brew_sp_txt, sizeof(brew_sp_txt))) {
         return reject_bad_request("Missing brew_sp");
@@ -1031,54 +1119,63 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
                                     hb_token_txt, sizeof(hb_token_txt));
     }
 
-    float pid_kp = 0.0F;
-    float pid_tn = 0.0F;
-    float pid_tv = 0.0F;
-    float pump_kp = 0.0F;
-    float pump_ki = 0.0F;
-    float pump_kd = 0.0F;
-    float brew_bias = 0.0F;
-    float brew_sp = 0.0F;
-    float steam_sp = 0.0F;
+    ControlSettingsValues v{};
     float brew_t = 0.0F;
     float preinf_t = 0.0F;
     float preinf_pause_t = 0.0F;
     std::uint16_t mqtt_port = 0;
 
-    if (!parse_float_in_range(pid_kp_txt, cfg::pid::kKpMin, cfg::pid::kKpMax, &pid_kp)) {
+    if (!parse_float_in_range(pid_kp_txt, cfg::pid::kKpMin, cfg::pid::kKpMax, &v.pid_kp)) {
         return reject_bad_request("Invalid pid_kp");
     }
-    if (!parse_float_in_range(pid_tn_txt, cfg::pid::kTnMinS, cfg::pid::kTnMaxS, &pid_tn)) {
+    if (!parse_float_in_range(pid_tn_txt, cfg::pid::kTnMinS, cfg::pid::kTnMaxS, &v.pid_tn_s)) {
         return reject_bad_request("Invalid pid_tn");
     }
-    if (!parse_float_in_range(pid_tv_txt, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &pid_tv)) {
+    if (!parse_float_in_range(pid_tv_txt, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &v.pid_tv_s)) {
         return reject_bad_request("Invalid pid_tv");
     }
-    if (!parse_float_in_range(pump_kp_txt, 0.0F, 100.0F, &pump_kp)) {
+    if (!parse_float_in_range(pump_kp_txt, 0.0F, 100.0F, &v.pump_kp)) {
         return reject_bad_request("Invalid pump_kp");
     }
-    if (!parse_float_in_range(pump_ki_txt, 0.0F, 10.0F, &pump_ki)) {
+    if (!parse_float_in_range(pump_ki_txt, 0.0F, 10.0F, &v.pump_ki)) {
         return reject_bad_request("Invalid pump_ki");
     }
-    if (!parse_float_in_range(pump_kd_txt, 0.0F, 50.0F, &pump_kd)) {
+    if (!parse_float_in_range(pump_kd_txt, 0.0F, 50.0F, &v.pump_kd)) {
         return reject_bad_request("Invalid pump_kd");
     }
-    if (!parse_float_in_range(brew_bias_txt,
-                              cfg::pid::kBrewingBiasMinC,
-                              cfg::pid::kBrewingBiasMaxC,
-                              &brew_bias)) {
-        return reject_bad_request("Invalid brew_bias");
+    if (!parse_float_in_range(brew_kp_txt, cfg::pid::kKpMin, cfg::pid::kKpMax, &v.brew_kp)) {
+        return reject_bad_request("Invalid brew_kp");
+    }
+    if (!parse_float_in_range(brew_tn_txt, cfg::pid::kBrewTnMinS, cfg::pid::kTnMaxS,
+                              &v.brew_tn_s)) {
+        return reject_bad_request("Invalid brew_tn");
+    }
+    if (!parse_float_in_range(brew_tv_txt, cfg::pid::kTvMinS, cfg::pid::kTvMaxS,
+                              &v.brew_tv_s)) {
+        return reject_bad_request("Invalid brew_tv");
+    }
+    if (!parse_float_in_range(brew_trail_txt,
+                              cfg::pid::kBrewTrailingMinS,
+                              cfg::pid::kBrewTrailingMaxS,
+                              &v.brew_trailing_s)) {
+        return reject_bad_request("Invalid brew_trail");
+    }
+    if (!parse_float_in_range(brew_pulse_txt,
+                              cfg::pid::kBrewPulseMinS,
+                              cfg::pid::kBrewPulseMaxS,
+                              &v.brew_pulse_s)) {
+        return reject_bad_request("Invalid brew_pulse");
     }
     if (!parse_float_in_range(brew_sp_txt,
                               cfg::pid::kSetpointMinC,
                               cfg::pid::kSetpointMaxC,
-                              &brew_sp)) {
+                              &v.brew_setpoint_c)) {
         return reject_bad_request("Invalid brew_sp");
     }
     if (!parse_float_in_range(steam_sp_txt,
                               cfg::pid::kSteamSetpointMinC,
                               cfg::pid::kSteamSetpointMaxC,
-                              &steam_sp)) {
+                              &v.steam_setpoint_c)) {
         return reject_bad_request("Invalid steam_sp");
     }
     if (!parse_float_in_range(brew_t_txt,
@@ -1131,7 +1228,11 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
         {kCfgPumpKp, pump_kp_txt},
         {kCfgPumpKi, pump_ki_txt},
         {kCfgPumpKd, pump_kd_txt},
-        {kCfgBrewingBias, brew_bias_txt},
+        {kCfgBrewKp, brew_kp_txt},
+        {kCfgBrewTn, brew_tn_txt},
+        {kCfgBrewTv, brew_tv_txt},
+        {kCfgBrewTrailing, brew_trail_txt},
+        {kCfgBrewPulse, brew_pulse_txt},
         {kCfgBrewSetpoint, brew_sp_txt},
         {kCfgSteamSetpoint, steam_sp_txt},
         {kCfgBrewTime, brew_t_txt},
@@ -1160,8 +1261,7 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
         return httpd_resp_send_500(req);
     }
 
-    publish_runtime_control_settings(pid_kp, pid_tn, pid_tv, brew_sp, steam_sp,
-                                     pump_kp, pump_ki, pump_kd, brew_bias);
+    publish_runtime_control_settings(v);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req,
@@ -1656,6 +1756,8 @@ void control_task(void* arg) {
     ESP_LOGI(kTag, "control_task: running on core %d", xPortGetCoreID());
 
     espid::pid::Controller controller;
+    espid::pid::HeaterPhaseTracker phase_tracker;
+    espid::pid::ShotThermalStats shot_stats;
     bool heater_ready = false;
 
     if (cfg::heater::kEnabled && heater != nullptr) {
@@ -1735,35 +1837,54 @@ void control_task(void* arg) {
         }
         const bool emergency_stop = g_emergency_stop.load(std::memory_order_relaxed);
 
-        const float pid_kp = g_runtime_control.pid_kp.load(std::memory_order_relaxed);
-        const float pid_tn_s = g_runtime_control.pid_tn_s.load(std::memory_order_relaxed);
-        const float pid_tv_s = g_runtime_control.pid_tv_s.load(std::memory_order_relaxed);
-        const float brew_setpoint_c =
-            g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
-        const float steam_setpoint_c =
-            g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed);
-        const float active_setpoint_c =
-            steam_active
-                ? steam_setpoint_c
-                : (brew_setpoint_c +
-                   (g_shot.running.load(std::memory_order_relaxed)
-                        ? g_runtime_control.brewing_bias_c.load(std::memory_order_relaxed)
-                        : 0.0F));
+        const bool shot_running = g_shot.running.load(std::memory_order_relaxed);
+        const std::uint32_t trailing_ms = static_cast<std::uint32_t>(
+            g_runtime_control.brew_trailing_s.load(std::memory_order_relaxed) * 1000.0F);
+        const espid::pid::HeaterPhase phase =
+            phase_tracker.update(steam_active, shot_running, now_ms, trailing_ms);
+        const bool brew_gains = espid::pid::HeaterPhaseTracker::uses_brew_gains(phase);
 
+        const float kp = brew_gains
+            ? g_runtime_control.brew_kp.load(std::memory_order_relaxed)
+            : g_runtime_control.pid_kp.load(std::memory_order_relaxed);
+        const float tn_s = brew_gains
+            ? g_runtime_control.brew_tn_s.load(std::memory_order_relaxed)
+            : g_runtime_control.pid_tn_s.load(std::memory_order_relaxed);
+        const float tv_s = brew_gains
+            ? g_runtime_control.brew_tv_s.load(std::memory_order_relaxed)
+            : g_runtime_control.pid_tv_s.load(std::memory_order_relaxed);
+        const float active_setpoint_c = steam_active
+            ? g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed)
+            : g_runtime_control.brew_setpoint_c.load(std::memory_order_relaxed);
+
+        // Gains swap in place: the integrator stores the ki-scaled sum, so
+        // the transition is bumpless and Tn = 0 simply freezes it.
         espid::pid::Controller::Config pcfg{};
-        pcfg.kp = pid_kp;
-        pcfg.ki = (pid_tn_s > 0.0F) ? (pid_kp / pid_tn_s) : 0.0F;
-        pcfg.kd = pid_kp * pid_tv_s;
+        pcfg.kp = kp;
+        pcfg.ki = (tn_s > 0.0F) ? (kp / tn_s) : 0.0F;
+        pcfg.kd = kp * tv_s;
         pcfg.output_min = cfg::pid::kOutputMin;
         pcfg.output_max = cfg::pid::kOutputMax;
         pcfg.integral_min = cfg::pid::kIntegralMin;
         pcfg.integral_max = cfg::pid::kIntegralMax;
         pcfg.sample_period_s = cfg::pid::kSamplePeriodS;
+        pcfg.d_filter_tau_s = cfg::pid::kDerivativeFilterTauS;
+        pcfg.conditional_integration = true;
         controller.set_config(pcfg);
+
+        const std::uint64_t brew_pulse_ms = static_cast<std::uint64_t>(
+            g_runtime_control.brew_pulse_s.load(std::memory_order_relaxed) * 1000.0F);
+        const bool brew_pulse = phase == espid::pid::HeaterPhase::kBrew &&
+                                (now_ms - phase_tracker.entered_ms()) < brew_pulse_ms;
 
         float duty_pct = 0.0F;
         if (sample_fresh && std::isfinite(temp_c) && !emergency_stop) {
             duty_pct = controller.update(active_setpoint_c, temp_c);
+            // Feed-forward: the PID still runs (state stays current), only the
+            // applied duty is raised while the pulse window is open.
+            if (brew_pulse && duty_pct < cfg::pid::kBrewPulseDutyPct) {
+                duty_pct = cfg::pid::kBrewPulseDutyPct;
+            }
         } else {
             controller.reset();
             duty_pct = 0.0F;
