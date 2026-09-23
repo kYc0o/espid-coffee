@@ -2362,6 +2362,9 @@ void pump_task(void* arg) {
     pcfg.integral_min   = cfg::pump::kPidIntegralMin;
     pcfg.integral_max   = cfg::pump::kPidIntegralMax;
     pcfg.sample_period_s = cfg::pump::kPidSamplePeriodS;
+    // The ramp from 0 bar to setpoint saturates the output for several
+    // seconds; hold the integral there so it does not wind up.
+    pcfg.conditional_integration = true;
     pid.set_config(pcfg);
 
     const TickType_t period = ticks_from_ms(
@@ -2380,18 +2383,43 @@ void pump_task(void* arg) {
                 pcfg.kd = g_runtime_control.pump_kd.load(std::memory_order_relaxed);
                 pid.set_config(pcfg);
                 last_zc = ctx->psm->zc_count();
+                // Record the gains actually in force: these come from NVS, so
+                // a stale web-UI value silently overrides the config default.
+                ESP_LOGI(kTag,
+                         "pump: brew start — sp=%.2fbar Kp=%.2f Ki=%.3f Kd=%.3f "
+                         "I=[%.0f..%.0f] out=[%.0f..%.0f]",
+                         static_cast<double>(cfg::pump::kPressureSetpointBar),
+                         static_cast<double>(pcfg.kp),
+                         static_cast<double>(pcfg.ki),
+                         static_cast<double>(pcfg.kd),
+                         static_cast<double>(pcfg.integral_min),
+                         static_cast<double>(pcfg.integral_max),
+                         static_cast<double>(pcfg.output_min),
+                         static_cast<double>(pcfg.output_max));
             }
             was_brewing = true;
             if (g_pressure.valid.load(std::memory_order_acquire)) {
                 const float p = g_pressure.pressure_bar.load(std::memory_order_relaxed);
                 const float power = pid.update(cfg::pump::kPressureSetpointBar, p);
                 (void)ctx->psm->set_power_pct(power);
+                g_pump_power_pct.store(power, std::memory_order_relaxed);
                 if ((++log_div % 10U) == 0U) {
                     const std::uint32_t zc_now = ctx->psm->zc_count();
                     const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
                     // ZC delta over 10 samples (1 s): expect ~100 for healthy 50 Hz.
-                    ESP_LOGI(kTag, "pump: p=%.2fbar power=%.1f%% temp=%.1fC zc/s=%u",
-                             static_cast<double>(p), static_cast<double>(power),
+                    // P/I/D split tells a starved loop (power < 100 while short
+                    // of setpoint) from a hydraulic limit (power pinned at 100).
+                    const auto& t = pid.last_terms();
+                    ESP_LOGI(kTag,
+                             "pump: p=%.2fbar e=%+.2f power=%.1f%% P=%+.1f I=%+.1f "
+                             "D=%+.1f u=%+.1f temp=%.1fC zc/s=%u",
+                             static_cast<double>(p),
+                             static_cast<double>(cfg::pump::kPressureSetpointBar - p),
+                             static_cast<double>(power),
+                             static_cast<double>(t.p),
+                             static_cast<double>(t.i),
+                             static_cast<double>(t.d),
+                             static_cast<double>(t.unclamped),
                              static_cast<double>(temp_c),
                              static_cast<unsigned>(zc_now - last_zc));
                     last_zc = zc_now;

@@ -260,18 +260,24 @@ constexpr float          kStartupFillPowerPct     = 100.0F;
 // Minimum ZC edges during fill that confirm the pump was actually running.
 // At 100/s (50 Hz both-edge), 60 s of pumping = 6000 edges.
 constexpr std::uint32_t  kStartupFillMinZcCount   = 3000;  // 30 s minimum
-
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
-// Gains validated on hardware (blind PF + gauge): fast rise to 9 bar (~7 s),
-// dead-on hold at ~3 % pump, and active recovery from a steam-wand disturbance.
+// The original gains were validated with a blind portafilter, which passes no
+// water: holding 9 bar then takes ~3 % pump and the integral never has to
+// work. A real puck needs most of the pump's range, and telemetry from
+// 2026-09-17 showed the loop starved — pressure sagged to ~5 bar while the
+// reconstructed command sat at ~56-64 %, because the ±5 % integral clamp caps
+// the answer to a steady error at 15*e + 5, and Tn = Kp/Ki = 50 s is longer
+// than the shot itself. The integral now spans the output range (Tn = 5 s)
+// and pump_task runs conditional integration so the saturated ramp-up to
+// pressure does not wind it up.
 constexpr float          kPressureSetpointBar = 9.0F;
 constexpr float          kPidKp               = 15.0F;
-constexpr float          kPidKi               = 0.3F;
+constexpr float          kPidKi               = 3.0F;   // Kp / Tn, Tn = 5 s
 constexpr float          kPidKd               = 0.8F;
 constexpr float          kPidOutputMin        = 0.0F;
 constexpr float          kPidOutputMax        = 100.0F;
-constexpr float          kPidIntegralMin      = -5.0F;
-constexpr float          kPidIntegralMax      = 5.0F;
+constexpr float          kPidIntegralMin      = -20.0F;
+constexpr float          kPidIntegralMax      = 100.0F;
 constexpr float          kPidSamplePeriodS    = 0.1F;  // 10 Hz
 constexpr std::uint32_t  kTaskStackBytes      = 4096;
 constexpr std::uint32_t  kTaskPriority        = 5;
