@@ -225,17 +225,39 @@ struct PressureSnapshot { // produced by pressure_task
 
 struct RuntimeControlSettings { // NVS-shadowed, mutated by web-UI handler
     std::atomic<float> pid_kp, pid_tn_s, pid_tv_s;
-    std::atomic<float> brew_setpoint_c, steam_setpoint_c, brewing_bias_c;
+    std::atomic<float> brew_setpoint_c, steam_setpoint_c;
+    std::atomic<float> brew_kp, brew_tn_s, brew_tv_s, brew_trailing_s,
+                       brew_pulse_s;
     std::atomic<float> pump_kp, pump_ki, pump_kd;
 };
 ```
 
 Standalone control/coordination flags (all `std::atomic`):
-`g_control_duty_pct`, `g_weight_g`, `g_steam_active` (steam switch →
-control_task setpoint select), `g_emergency_stop` (over-temp latch),
-`g_fill_complete` / `g_fill_ok` (startup-fill handshake gating the
-heater), `g_mqtt_connected`. The shared OLED/ABP2 I2C bus is guarded by
-`g_i2c_bus_mutex` (a real mutex — the only lock in the design).
+`g_control_duty_pct`, `g_pump_power_pct`, `g_weight_g`, `g_steam_active`
+(steam switch → control_task setpoint select), `g_emergency_stop`
+(over-temp latch), `g_fill_complete` / `g_fill_ok` (startup-fill
+handshake gating the heater), `g_mqtt_connected`. The shared OLED/ABP2
+I2C bus is guarded by `g_i2c_bus_mutex` (a real mutex — the only lock in
+the design).
+
+Two further snapshots feed telemetry: `g_control` (heater phase,
+setpoint, error, slope, P/I/D split and the gains in force, written by
+control_task every step) and `g_shot_summary` (per-shot dip/overshoot/
+settling metrics, published once per shot behind a `seq` counter that
+mqtt_task re-checks to reject a torn read).
+
+MQTT publish cadence is not fixed: `pid::TelemetryPolicy` picks it from
+the heater phase — 1 s during the first 10 min after boot, 500 ms while
+brewing or trailing, 1 s for steam or any excursion off setpoint, and a
+10 s heartbeat once settled. Each record carries enough state to replay
+the loop offline; `shot_summary` closes each shot, and `brew_start` /
+`brew_stop` / `steam_on` / `steam_off` mark the mode edges.
+
+Every record also carries numeric mirrors of its string fields (`rec`
+for the record type, `phase_id` for the heater phase). The collector
+(Hono → Kafka → Telegraf → TimescaleDB) parses JSON with the numeric-only
+field rule, so undeclared string fields never reach the database; the
+strings stay for human and MQTT consumers, the codes are what persist.
 
 ---
 
@@ -316,8 +338,9 @@ configuration namespace** (`espid::config::*`). Everything is
 `net`, `mqtt`, `hawkbit`. `scale` is wired but gated off
 (`scale::kEnabled == false`) until bench calibration.
 
-Runtime-mutable parameters (PID gains, brew/steam setpoints, pump PID
-gains, brewing bias, Wi-Fi credentials, MQTT endpoint, HawkBit
+Runtime-mutable parameters (idle and brew-phase heater PID gains, brew
+trailing time and heat pulse, brew/steam setpoints, pump PID gains,
+Wi-Fi credentials, MQTT endpoint, HawkBit
 server/token) are shadowed from NVS at boot and overridden live by the
 embedded web UI; `config::` remains the compile-time fallback.
 
