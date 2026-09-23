@@ -1489,9 +1489,9 @@ void pressure_task(void* arg) {
 
                     const char* status_label = "unknown";
                     switch (status_bits) {
-                        case 0U: status_label = "normal"; break;
-                        case 1U: status_label = "command"; break;
-                        case 2U: status_label = "stale"; break;
+                        case 0U: status_label = "unpowered"; break;
+                        case 1U: status_label = "powered"; break;
+                        case 2U: status_label = "reserved"; break;
                         case 3U: status_label = "diagnostic"; break;
                         default: break;
                     }
@@ -1515,7 +1515,7 @@ void pressure_task(void* arg) {
             }
         } else {
             const auto& s = sample_value;
-            const bool stale_sample = (s.status == espid::abp2::FrameStatus::kStaleData);
+            const bool stale_sample = s.busy;
             g_pressure_consecutive_errors.store(0U, std::memory_order_relaxed);
             g_pressure.pressure_bar.store(s.pressure_bar, std::memory_order_relaxed);
             g_pressure.pressure_psi.store(s.pressure_psi, std::memory_order_relaxed);

@@ -10,6 +10,9 @@ constexpr float kPsiToBar = 0.0689476F;
 constexpr float kTempScaleC = 270.0F;
 constexpr float kTempOffsetC = -40.0F;
 constexpr float kCountsMax24 = 16'777'215.0F;
+constexpr std::uint8_t kBusyBit = 0x20U;
+// Counts may sit up to 1/10 of the calibrated span below the floor.
+constexpr std::uint32_t kFloorToleranceDivisor = 10U;
 
 bool valid_transfer(const TransferFunction& tf) noexcept {
     if (tf.output_max_counts <= tf.output_min_counts) {
@@ -36,6 +39,14 @@ hal_cpp::Result<DecodedSample> decode_frame(const std::uint8_t raw[7],
     if (status == FrameStatus::kDiagnostic) {
         return hal_cpp::Error::kHardwareFault;
     }
+    // No power bit means the device did not answer (an absent or garbled
+    // response reads back as all zeros). Without this the zero pressure word
+    // below would clamp to the transfer-function floor and be returned as a
+    // perfectly good 0 bar sample.
+    if (status != FrameStatus::kPowered) {
+        return hal_cpp::Error::kBusError;
+    }
+    const bool busy = (raw[0] & kBusyBit) != 0U;
 
     // ABP2 command-response payload uses 24-bit pressure and temperature words.
     const std::uint32_t pressure_counts =
@@ -57,6 +68,13 @@ hal_cpp::Result<DecodedSample> decode_frame(const std::uint8_t raw[7],
         static_cast<float>(temperature_counts) > kCountsMax24) {
         return hal_cpp::Error::kRangeError;
     }
+    // Sitting a little under the 10% floor is normal at zero gauge pressure;
+    // sitting far under it is not a reading the sensor produces.
+    const std::uint32_t floor_tolerance = static_cast<std::uint32_t>(
+        (tf.output_max_counts - tf.output_min_counts) / kFloorToleranceDivisor);
+    if (pressure_counts + floor_tolerance < tf.output_min_counts) {
+        return hal_cpp::Error::kRangeError;
+    }
 
     const float counts_span =
         static_cast<float>(tf.output_max_counts - tf.output_min_counts);
@@ -72,6 +90,7 @@ hal_cpp::Result<DecodedSample> decode_frame(const std::uint8_t raw[7],
 
     return DecodedSample{
         .status = status,
+        .busy = busy,
         .pressure_counts = pressure_counts,
         .temperature_counts = temperature_counts,
         .pressure_psi = pressure_psi,

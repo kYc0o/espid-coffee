@@ -11,10 +11,20 @@
 
 namespace espid::abp2 {
 
+// ABP2 status byte (first byte of the 7-byte read response):
+//   bit 6  powered      1 = device answered normally  -> a healthy read is 0x40
+//   bit 5  busy         conversion in progress, words not yet updated
+//   bit 2  memory error
+//   bit 0  math saturation
+// These names follow the ABP2 datasheet. The older HSC/SSC parts encode bits
+// 7:6 as normal/command/stale/diagnostic, and reading an ABP2 that way makes a
+// healthy frame look like "command mode" and an all-zero (absent) frame look
+// like "normal" — which is how a garbled read used to pass as 0.000 bar.
+// Numeric values are unchanged so existing telemetry keeps its meaning.
 enum class FrameStatus : std::uint8_t {
-    kNormal = 0,
-    kCommandMode = 1,
-    kStaleData = 2,
+    kUnpowered  = 0,  // power bit clear: no response, or a garbled frame
+    kPowered    = 1,  // normal
+    kReserved   = 2,  // bit 7 set; an ABP2 never reports this
     kDiagnostic = 3,
 };
 
@@ -29,7 +39,8 @@ struct TransferFunction {
 };
 
 struct DecodedSample {
-    FrameStatus status{FrameStatus::kNormal};
+    FrameStatus status{FrameStatus::kPowered};
+    bool busy{false};  // status bit 5: words not refreshed yet
     std::uint32_t pressure_counts{0};
     std::uint32_t temperature_counts{0};
     float pressure_psi{0.0F};
