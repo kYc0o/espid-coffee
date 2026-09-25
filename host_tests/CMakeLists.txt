@@ -61,6 +61,12 @@ target_include_directories(espid_brew INTERFACE
     ${REPO_ROOT}/components/brew/include
 )
 
+# ui status selection is header-only and host-testable.
+add_library(espid_ui INTERFACE)
+target_include_directories(espid_ui INTERFACE
+    ${REPO_ROOT}/components/ui/include
+)
+
 # heater slow-PWM core is header-only and host-testable.
 add_library(espid_heater INTERFACE)
 target_include_directories(espid_heater INTERFACE
@@ -90,6 +96,7 @@ add_executable(espid_unit_tests
     test_over_temp_guard.cpp
     test_duty_accumulator.cpp
     test_refill_sequencer.cpp
+    test_machine_status.cpp
     test_brew.cpp
     test_heater.cpp
     test_psm.cpp
@@ -101,6 +108,7 @@ target_link_libraries(espid_unit_tests PRIVATE
     espid_abp2_decoder
     espid_pid
     espid_brew
+    espid_ui
     espid_heater
     espid_pump
     espid_scale
