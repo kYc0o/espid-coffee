@@ -76,6 +76,15 @@ constexpr std::uint8_t  kRotationQuadrants = 2;
 constexpr std::uint32_t kRefreshPeriodMs   = 200;
 constexpr std::uint32_t kI2cLockTimeoutMs  = 50;
 constexpr std::uint32_t kSplashDurationMs  = 2000;
+// Header "STEAM ready" once within kSteamReadyOnBelowC of the steam setpoint;
+// back to "STEAM heating" only after dropping kSteamReadyOffBelowC below it
+// (a 125 g pitcher pulled the boiler down ~6.6 C on 2026-09-24).
+constexpr float         kSteamReadyOnBelowC  = 2.0F;
+constexpr float         kSteamReadyOffBelowC = 5.0F;
+// Operator prompts (press / release BREW) blink: visible kPromptBlinkOnMs of
+// every kPromptBlinkPeriodMs.
+constexpr std::uint32_t kPromptBlinkPeriodMs = 1000;
+constexpr std::uint32_t kPromptBlinkOnMs     = 700;
 constexpr std::uint32_t kTaskStackBytes    = 4096;
 constexpr std::uint32_t kTaskPriority      = 4;
 constexpr std::int32_t  kTaskCore          = 1;

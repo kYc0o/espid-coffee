@@ -26,6 +26,7 @@ idf_component_register(
         valve
         scale
         hawkbit
+        ui
 )
 
 # Modern C++ for application code.

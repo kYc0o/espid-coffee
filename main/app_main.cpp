@@ -40,6 +40,7 @@
 #include "pid/over_temp_guard.hpp"
 #include "pid/telemetry_policy.hpp"
 #include "pump/refill_sequencer.hpp"
+#include "ui/machine_status.hpp"
 #include "pid/shot_thermal_stats.hpp"
 #include "pump/psm_pump.hpp"
 #include "scale/hx711_scale.hpp"
@@ -2261,6 +2262,10 @@ void display_task(void* arg) {
     bool          was_shot_active = false;
     std::uint64_t post_shot_until_ms = 0;
     std::uint32_t lock_div = 0;
+    espid::ui::SteamReadyTracker steam_ready(cfg::oled::kSteamReadyOnBelowC,
+                                             cfg::oled::kSteamReadyOffBelowC);
+    bool cooldown_was = false;
+    bool refilled_this_cooldown = false;
 
     for (;;) {
         const std::uint64_t now_ms =
@@ -2310,6 +2315,52 @@ void display_task(void* arg) {
             std::snprintf(temp_str, sizeof(temp_str), "--.--");
         }
 
+        // What the machine is doing, and what the operator should do next.
+        using RefillState = espid::pump::RefillSequencer::State;
+        const auto refill_state =
+            static_cast<RefillState>(g_refill.state.load(std::memory_order_acquire));
+        espid::ui::StatusInputs status_in{};
+        status_in.fill_complete =
+            cfg::pump::kTestMode || g_fill_complete.load(std::memory_order_acquire);
+        status_in.fill_ok =
+            cfg::pump::kTestMode || g_fill_ok.load(std::memory_order_acquire);
+        status_in.estop = g_emergency_stop.load(std::memory_order_relaxed);
+        status_in.shot_running = shot_active;
+        status_in.steam_active = steam_active;
+        status_in.steam_ready = steam_ready.update(
+            steam_active, (valid ? t : NAN), steam_setpoint_c);
+        status_in.steam_cooldown = g_steam_cooldown.load(std::memory_order_acquire);
+        status_in.refill_running = refill_state == RefillState::kRunning;
+        status_in.refill_waiting_release = refill_state == RefillState::kFinished;
+        const auto refill_reason = static_cast<espid::pump::RefillSequencer::StopReason>(
+            g_refill.reason.load(std::memory_order_relaxed));
+        status_in.refill_timed_out =
+            refill_reason == espid::pump::RefillSequencer::StopReason::kTimeout;
+        // Each steam session gets its own cool-down; remember whether its
+        // boiler has already been confirmed full.
+        if (status_in.steam_cooldown && !cooldown_was) {
+            refilled_this_cooldown = false;
+        }
+        if (refill_state == RefillState::kFinished &&
+            refill_reason == espid::pump::RefillSequencer::StopReason::kFull) {
+            refilled_this_cooldown = true;
+        }
+        cooldown_was = status_in.steam_cooldown;
+        status_in.refilled_this_cooldown = refilled_this_cooldown;
+        const espid::ui::MachineStatus status = espid::ui::select_status(status_in);
+        const std::uint64_t refill_started_ms =
+            g_refill.started_ms.load(std::memory_order_relaxed);
+        const std::uint32_t refill_elapsed_s =
+            (status_in.refill_running && now_ms >= refill_started_ms)
+                ? static_cast<std::uint32_t>((now_ms - refill_started_ms) / 1000U)
+                : 0U;
+        char status_str[24];
+        (void)espid::ui::format_header(status, refill_elapsed_s,
+                                       status_str, sizeof(status_str));
+        const bool status_visible =
+            !espid::ui::needs_attention(status) ||
+            (now_ms % cfg::oled::kPromptBlinkPeriodMs) < cfg::oled::kPromptBlinkOnMs;
+
         char setpoint_str[16];
         const float shown_setpoint_c = steam_active ? steam_setpoint_c : brew_setpoint_c;
         const char* setpoint_prefix   = steam_active ? "ST" : "SP";
@@ -2328,8 +2379,9 @@ void display_task(void* arg) {
             display->draw_text(86, 10, espid::hal_cpp::Font::kSmall,
                                wifi_ip.data());
         } else {
-            display->draw_text(0, 10, espid::hal_cpp::Font::kSmall,
-                               "ESPID-Coffee");
+            if (status_visible) {
+                display->draw_text(0, 10, espid::hal_cpp::Font::kSmall, status_str);
+            }
             display->draw_text(96, 10, espid::hal_cpp::Font::kSmall,
                                wifi_label(wifi_state));
         }
@@ -2359,6 +2411,22 @@ void display_task(void* arg) {
                               static_cast<double>(shot_ms) / 1000.0);
             }
             std::snprintf(footer, sizeof(footer), "%s %sC", small, setpoint_str);
+            // During and right after a refill the footer shows its progress
+            // and, when it stopped, why.
+            if (status == espid::ui::MachineStatus::kRefilling) {
+                if (pressure_valid && std::isfinite(pressure_bar)) {
+                    std::snprintf(footer, sizeof(footer), "P:%4.1fbar full@%.1f",
+                                  static_cast<double>(pressure_bar),
+                                  static_cast<double>(cfg::pump::kRefillFullPressureBar));
+                } else {
+                    std::snprintf(footer, sizeof(footer), "P:--.-bar full@%.1f",
+                                  static_cast<double>(cfg::pump::kRefillFullPressureBar));
+                }
+            } else if (status == espid::ui::MachineStatus::kRefillFullRelease) {
+                std::snprintf(footer, sizeof(footer), "boiler refilled");
+            } else if (status == espid::ui::MachineStatus::kRefillTimeoutRelease) {
+                std::snprintf(footer, sizeof(footer), "steam knob open?");
+            }
             display->draw_text(8,  44, espid::hal_cpp::Font::kLarge, temp_str);
             display->draw_text(110, 28, espid::hal_cpp::Font::kSmall, "C");
             display->draw_text(0,  60, espid::hal_cpp::Font::kSmall, footer);
