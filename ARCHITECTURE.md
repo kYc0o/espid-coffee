@@ -72,14 +72,15 @@ ESPID-Coffee/
 │   ├── tsic306/                  # RMT-based ZACwire driver + pure decoder
 │   ├── ssd1306/                  # U8g2-backed IDisplay implementation
 │   ├── wifi/                     # esp_wifi INetwork impl (STA + AP fallback)
-│   ├── pid/                      # header-only discrete PID controller
+│   ├── pid/                      # header-only PID + heater phase, over-temp guard, telemetry helpers
 │   ├── abp2/                     # ABP2 pressure sensor driver + decoder
 │   ├── heater/                   # slow-PWM SSR IHeater implementation
 │   ├── valve/                    # 3-way solenoid GPIO driver
-│   ├── pump/                     # PSM phase-control pump (ZC ISR) + PsmCore
+│   ├── pump/                     # PSM phase-control pump (ZC ISR) + PsmCore + refill sequencer
 │   ├── scale/                    # dual-HX711 driver + ScaleCore (pure logic)
 │   ├── hawkbit/                  # HawkBit DDI OTA client
-│   └── brew/                     # debounced brew button + shot timer (header-only)
+│   ├── brew/                     # debounced brew button + shot timer (header-only)
+│   └── ui/                       # OLED status/prompt selection (header-only)
 ├── host_tests/                   # GoogleTest harness, ESP-IDF Linux target
 │   ├── CMakeLists.txt
 │   ├── test_tsic306.cpp
@@ -251,7 +252,20 @@ the heater phase — 1 s during the first 10 min after boot, 500 ms while
 brewing or trailing, 1 s for steam or any excursion off setpoint, and a
 10 s heartbeat once settled. Each record carries enough state to replay
 the loop offline; `shot_summary` closes each shot, and `brew_start` /
-`brew_stop` / `steam_on` / `steam_off` mark the mode edges.
+`brew_stop` / `steam_on` / `steam_off` / `refill_start` / `refill_stop`
+mark the mode edges.
+
+Post-steam handling. `pid::OverTempGuard` (in control_task) keeps the steam
+over-temperature limits in force after the steam switch goes off, until the
+boiler has cooled below the brew stop threshold minus a margin; it publishes
+that cool-down as `g_steam_cooldown`. A brew-switch press during the
+cool-down is not a shot: button_task raises `g_refill_switch` instead, leaves
+the valve closed, and pump_task runs `pump::RefillSequencer`, pumping gently
+into the boiler until pressure confirms it is hydraulically full (or a
+timeout, or the switch is released). Results land in `g_refill` behind
+start/stop sequence counters for mqtt_task; `refill_stop` reports pump
+half-cycles fired and the temperature drop, the two handles for estimating
+how much water went back in.
 
 Every record also carries numeric mirrors of its string fields (`rec`
 for the record type, `phase_id` for the heater phase). The collector
