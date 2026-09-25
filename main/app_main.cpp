@@ -39,6 +39,7 @@
 #include "pid/heater_phase.hpp"
 #include "pid/over_temp_guard.hpp"
 #include "pid/telemetry_policy.hpp"
+#include "pump/refill_sequencer.hpp"
 #include "pid/shot_thermal_stats.hpp"
 #include "pump/psm_pump.hpp"
 #include "scale/hx711_scale.hpp"
@@ -318,6 +319,29 @@ struct ShotSummarySnapshot {
 };
 
 ShotSummarySnapshot g_shot_summary;
+
+// Post-steam refill: button_task raises g_refill_switch for a brew press made
+// while control_task reports the steam cool-down (g_steam_cooldown); pump_task
+// runs the refill and fills RefillSnapshot, bumping start_seq / stop_seq after
+// the fields so mqtt_task can publish each edge once.
+std::atomic<bool> g_steam_cooldown{false};
+std::atomic<bool> g_refill_switch{false};
+
+struct RefillSnapshot {
+    std::atomic<std::uint32_t> start_seq{0};
+    std::atomic<std::uint32_t> stop_seq{0};
+    std::atomic<float>         start_temp_c{0.0F};
+    std::atomic<float>         start_pressure_bar{0.0F};
+    std::atomic<float>         end_temp_c{0.0F};
+    std::atomic<float>         end_pressure_bar{0.0F};
+    std::atomic<std::uint32_t> duration_ms{0};
+    std::atomic<std::uint32_t> fired_half_cycles{0};
+    std::atomic<std::uint8_t>  reason{0};
+    std::atomic<std::uint8_t>  state{0};        // RefillSequencer::State, every loop
+    std::atomic<std::uint64_t> started_ms{0};
+};
+
+RefillSnapshot g_refill;
 std::atomic<float> g_weight_g{0.0F};
 std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
@@ -1615,6 +1639,10 @@ void mqtt_task(void* /*arg*/) {
         bool prev_shot_running = false;
         bool prev_steam_active = g_steam_active.load(std::memory_order_relaxed);
         std::uint64_t steam_started_ms = 0;
+        std::uint32_t last_refill_start_seq =
+            g_refill.start_seq.load(std::memory_order_acquire);
+        std::uint32_t last_refill_stop_seq =
+            g_refill.stop_seq.load(std::memory_order_acquire);
         std::uint32_t last_summary_seq =
             g_shot_summary.seq.load(std::memory_order_acquire);
 
@@ -1837,6 +1865,56 @@ void mqtt_task(void* /*arg*/) {
                     }
                 }
 
+                // Post-steam refill edges. Each record carries enough to
+                // estimate the volume put back: pump half-cycles delivered
+                // and the boiler temperature drop the cold water caused.
+                const std::uint32_t rs = g_refill.start_seq.load(std::memory_order_acquire);
+                if (rs != last_refill_start_seq) {
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"refill_start\",\"rec\":%u,\"uptime_ms\":%" PRIu64
+                        ",\"temp_c\":%.2f,\"pressure_bar\":%.3f}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kRefillStart),
+                        now_ms,
+                        static_cast<double>(g_refill.start_temp_c.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_refill.start_pressure_bar.load(std::memory_order_relaxed)));
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload) &&
+                        rs == g_refill.start_seq.load(std::memory_order_acquire)) {
+                        publish_payload(payload);
+                        last_refill_start_seq = rs;
+                    }
+                }
+                const std::uint32_t re = g_refill.stop_seq.load(std::memory_order_acquire);
+                if (re != last_refill_stop_seq) {
+                    const float t0 = g_refill.start_temp_c.load(std::memory_order_relaxed);
+                    const float t1 = g_refill.end_temp_c.load(std::memory_order_relaxed);
+                    const auto reason = static_cast<espid::pump::RefillSequencer::StopReason>(
+                        g_refill.reason.load(std::memory_order_relaxed));
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"refill_stop\",\"rec\":%u,\"uptime_ms\":%" PRIu64
+                        ",\"reason\":\"%s\",\"reason_id\":%u,\"duration_s\":%.1f"
+                        ",\"fired_half_cycles\":%" PRIu32
+                        ",\"start_temp_c\":%.2f,\"temp_c\":%.2f,\"temp_drop_c\":%.2f"
+                        ",\"start_pressure_bar\":%.3f,\"pressure_bar\":%.3f}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kRefillStop),
+                        now_ms,
+                        espid::pump::to_string(reason),
+                        static_cast<unsigned>(reason),
+                        static_cast<double>(g_refill.duration_ms.load(std::memory_order_relaxed)) / 1000.0,
+                        g_refill.fired_half_cycles.load(std::memory_order_relaxed),
+                        static_cast<double>(t0),
+                        static_cast<double>(t1),
+                        static_cast<double>(t0 - t1),
+                        static_cast<double>(g_refill.start_pressure_bar.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_refill.end_pressure_bar.load(std::memory_order_relaxed)));
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload) &&
+                        re == g_refill.stop_seq.load(std::memory_order_acquire)) {
+                        publish_payload(payload);
+                        last_refill_stop_seq = re;
+                    }
+                }
+
                 if (shot_running && now_ms >= next_pressure_publish_ms) {
                     const bool pressure_valid =
                         g_pressure.valid.load(std::memory_order_acquire);
@@ -1990,6 +2068,7 @@ void control_task(void* arg) {
             }
         }
         g_emergency_stop.store(over_temp.tripped(), std::memory_order_relaxed);
+        g_steam_cooldown.store(over_temp.cooling_down(), std::memory_order_release);
         const bool emergency_stop = g_emergency_stop.load(std::memory_order_relaxed);
 
         const bool shot_running = g_shot.running.load(std::memory_order_relaxed);
@@ -2316,7 +2395,7 @@ void display_task(void* arg) {
 // Pump task: startup fill then pressure-PID-controlled pump power during brew.
 struct PumpTaskCtx {
     espid::pump::PsmPump*       psm;
-    espid::valve::SolenoidValve* valve;  // must open during fill to complete pump AC circuit
+    espid::valve::SolenoidValve* valve;  // stays closed during fill and refill
 };
 
 void pump_task(void* arg) {
@@ -2367,9 +2446,9 @@ void pump_task(void* arg) {
             break;
         }
         if (static_cast<std::uint64_t>(esp_timer_get_time() / 1000) >= fill_deadline_ms) {
-            // Pressure sensor is on the group-head side of the valve; it reads 0
-            // while the valve is closed even if the pump ran successfully.
-            // Accept fill as OK if the pump demonstrably ran (ZC confirms it).
+            // A boiler that never pressurises (sensor fault, or a leak) should
+            // not block the heater forever if the pump demonstrably ran, so
+            // accept the fill when the ZC count confirms it.
             const std::uint32_t zc_delta = ctx->psm->zc_count() - zc_at_fill_start;
             if (zc_delta >= cfg::pump::kStartupFillMinZcCount) {
                 fill_ok = true;
@@ -2412,8 +2491,36 @@ void pump_task(void* arg) {
     std::uint32_t log_div = 0;
     bool was_brewing = false;
     std::uint32_t last_zc = 0;
+
+    espid::pump::RefillSequencer refill(espid::pump::RefillSequencer::Config{
+        cfg::pump::kRefillPowerPct, cfg::pump::kRefillFullPressureBar,
+        cfg::pump::kRefillConfirmMs, cfg::pump::kRefillMaxDurationMs});
+    bool refill_switch_was = false;
+    std::uint32_t refill_fired_start = 0;
+
     for (;;) {
         const bool brewing = g_shot.running.load(std::memory_order_relaxed);
+        const bool refill_switch = g_refill_switch.load(std::memory_order_acquire);
+        const std::uint64_t now_ms =
+            static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        const float p_now = g_pressure.pressure_bar.load(std::memory_order_relaxed);
+        const float temp_now = g_snapshot.temp_c.load(std::memory_order_relaxed);
+
+        if (refill_switch && !refill_switch_was && refill.state() ==
+                                espid::pump::RefillSequencer::State::kIdle) {
+            refill.start(now_ms);
+            g_refill.started_ms.store(now_ms, std::memory_order_relaxed);
+            refill_fired_start = ctx->psm->zc_stats().fired;
+            g_refill.start_temp_c.store(temp_now, std::memory_order_relaxed);
+            g_refill.start_pressure_bar.store(p_now, std::memory_order_relaxed);
+            g_refill.start_seq.fetch_add(1, std::memory_order_release);
+            ESP_LOGI(kTag, "refill: start T=%.2fC p=%.2fbar (power %.0f%%, full at %.1fbar)",
+                     static_cast<double>(temp_now), static_cast<double>(p_now),
+                     static_cast<double>(cfg::pump::kRefillPowerPct),
+                     static_cast<double>(cfg::pump::kRefillFullPressureBar));
+        }
+        refill_switch_was = refill_switch;
+
         if (brewing) {
             if (!was_brewing) {
                 // Brew just started: reload gains from NVS/web-UI, reset state.
@@ -2468,12 +2575,52 @@ void pump_task(void* arg) {
                 (void)ctx->psm->set_power_pct(cfg::pump::kDefaultPowerPct);
                 g_pump_power_pct.store(cfg::pump::kDefaultPowerPct, std::memory_order_relaxed);
             }
+        } else if (refill.state() != espid::pump::RefillSequencer::State::kIdle) {
+            was_brewing = false;
+            pid.reset();
+            // Steam back on cancels: refilling would only kill the steam.
+            const bool keep_going =
+                refill_switch && !g_steam_active.load(std::memory_order_relaxed);
+            const bool usable = g_pressure.valid.load(std::memory_order_acquire) &&
+                                !g_pressure.stale.load(std::memory_order_relaxed);
+            const float power = refill.step(now_ms, keep_going, usable, p_now);
+            (void)ctx->psm->set_power_pct(power);
+            g_pump_power_pct.store(power, std::memory_order_relaxed);
+
+            if (refill.running() && (++log_div % 10U) == 0U) {
+                ESP_LOGI(kTag, "refill: p=%.2fbar T=%.2fC power=%.0f%% t=%.1fs",
+                         static_cast<double>(p_now), static_cast<double>(temp_now),
+                         static_cast<double>(power),
+                         static_cast<double>(now_ms) / 1000.0);
+            }
+            if (refill.finished_now()) {
+                const std::uint32_t fired =
+                    ctx->psm->zc_stats().fired - refill_fired_start;
+                g_refill.end_temp_c.store(temp_now, std::memory_order_relaxed);
+                g_refill.end_pressure_bar.store(p_now, std::memory_order_relaxed);
+                g_refill.duration_ms.store(refill.duration_ms(), std::memory_order_relaxed);
+                g_refill.fired_half_cycles.store(fired, std::memory_order_relaxed);
+                g_refill.reason.store(static_cast<std::uint8_t>(refill.reason()),
+                                      std::memory_order_relaxed);
+                g_refill.stop_seq.fetch_add(1, std::memory_order_release);
+                ESP_LOGI(kTag,
+                         "refill: stop (%s) after %.1fs, %u pump half-cycles, "
+                         "T %.2f -> %.2fC, p=%.2fbar",
+                         espid::pump::to_string(refill.reason()),
+                         static_cast<double>(refill.duration_ms()) / 1000.0,
+                         static_cast<unsigned>(fired),
+                         static_cast<double>(g_refill.start_temp_c.load(std::memory_order_relaxed)),
+                         static_cast<double>(temp_now),
+                         static_cast<double>(p_now));
+            }
         } else {
             was_brewing = false;
             pid.reset();
             (void)ctx->psm->set_power_pct(0.0F);
             g_pump_power_pct.store(0.0F, std::memory_order_relaxed);
         }
+        g_refill.state.store(static_cast<std::uint8_t>(refill.state()),
+                             std::memory_order_release);
         vTaskDelay(period);
     }
 }
@@ -2617,6 +2764,8 @@ void button_task(void* arg) {
     bcfg.debounce_ms = cfg::brew::kDebounceMs;
     espid::brew::BrewButton btn(bcfg);
     espid::brew::ShotTimer  timer;
+    // True while the current press is a refill rather than a shot.
+    bool refill_press = false;
 
     for (;;) {
         const int           raw    = gpio_get_level(cfg::brew::kButtonGpio);
@@ -2625,19 +2774,34 @@ void button_task(void* arg) {
 
         const auto ev = btn.poll(raw != 0, now_ms);
         if (ev == espid::brew::BrewButton::Event::kPressed) {
-            timer.reset();
-            timer.start(now_ms);
-            if (valve != nullptr) {
-                (void)valve->open();
+            if (g_steam_cooldown.load(std::memory_order_acquire)) {
+                // No shot is wanted from a 115 C+ boiler; after steaming the
+                // brew switch tops the boiler up instead. The valve stays
+                // closed so the pump can only push water into the boiler.
+                refill_press = true;
+                g_refill_switch.store(true, std::memory_order_release);
+                ESP_LOGI(kTag, "brew switch during steam cool-down: boiler refill");
+            } else {
+                timer.reset();
+                timer.start(now_ms);
+                if (valve != nullptr) {
+                    (void)valve->open();
+                }
+                ESP_LOGI(kTag, "brew: start");
             }
-            ESP_LOGI(kTag, "brew: start");
         } else if (ev == espid::brew::BrewButton::Event::kReleased) {
-            timer.stop(now_ms);
-            if (valve != nullptr) {
-                (void)valve->close();
+            if (refill_press) {
+                refill_press = false;
+                g_refill_switch.store(false, std::memory_order_release);
+                ESP_LOGI(kTag, "brew switch released: refill session closed");
+            } else {
+                timer.stop(now_ms);
+                if (valve != nullptr) {
+                    (void)valve->close();
+                }
+                ESP_LOGI(kTag, "brew: stop  elapsed=%u ms",
+                         static_cast<unsigned>(timer.elapsed_ms(now_ms)));
             }
-            ESP_LOGI(kTag, "brew: stop  elapsed=%u ms",
-                     static_cast<unsigned>(timer.elapsed_ms(now_ms)));
         }
 
         g_shot.elapsed_ms.store(timer.elapsed_ms(now_ms),

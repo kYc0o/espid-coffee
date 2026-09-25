@@ -270,6 +270,20 @@ constexpr std::uint32_t  kStartupFillMinZcCount   = 3000;  // 30 s minimum
 // back at 0.17 bar) otherwise satisfies the dry-boiler guard in ~3 s.
 constexpr std::uint32_t  kStartupFillConfirmSamples = 3;
 
+// Post-steam boiler refill (brew switch pressed during the steam cool-down).
+// The valve stays closed, so water can only enter the boiler; while a steam
+// space remains, pressure sits near the steam pressure (~2-3.5 bar measured
+// at 120-130 C), and once the boiler is hydraulically full it climbs quickly
+// toward the pump dead-head. 5 bar sits clear of both. Low power keeps the
+// cold water from hitting the element as a slug. The timeout is the backstop
+// for the steam knob left open (boiler never pressurises); the refill_stop
+// telemetry reports the stop reason, so it can be widened if it trips on a
+// closed knob.
+constexpr float          kRefillPowerPct        = 30.0F;
+constexpr float          kRefillFullPressureBar = 5.0F;
+constexpr std::uint32_t  kRefillConfirmMs       = 600;
+constexpr std::uint32_t  kRefillMaxDurationMs   = 60'000;
+
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
 // The original gains were validated with a blind portafilter, which passes no
 // water: holding 9 bar then takes ~3 % pump and the integral never has to
@@ -424,6 +438,8 @@ enum class RecordType : std::uint8_t {
     kSteamOn     = 5,
     kSteamOff    = 6,
     kShotSummary = 7,
+    kRefillStart = 8,
+    kRefillStop  = 9,
 };
 // Telemetry cadence (see pid::TelemetryPolicy). Transients are what PID
 // tuning needs, so the rate follows the heater phase rather than a fixed
