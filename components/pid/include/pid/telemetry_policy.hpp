@@ -32,13 +32,20 @@ struct TelemetryPolicy {
 
     // Publish period for the current conditions. `err_c` is
     // setpoint - measurement; `slope_cps` is the filtered dT/dt.
+    //
+    // `shot_running` / `steam_active` are the live switch states. The heater
+    // phase is only updated by the control loop, so on the record published
+    // at the very start of a shot it can still read "idle"; deciding on the
+    // phase alone then scheduled the next record a full idle period later
+    // and lost the first 10 s of the 2026-09-25 shot (the pump ramp).
     static std::uint32_t period_ms(const Config& cfg, std::uint64_t uptime_ms,
                                    HeaterPhase phase, float err_c,
-                                   float slope_cps) noexcept {
-        if (HeaterPhaseTracker::uses_brew_gains(phase)) {
+                                   float slope_cps, bool shot_running = false,
+                                   bool steam_active = false) noexcept {
+        if (shot_running || HeaterPhaseTracker::uses_brew_gains(phase)) {
             return cfg.brew_period_ms;
         }
-        if (phase == HeaterPhase::kSteam) {
+        if (steam_active || phase == HeaterPhase::kSteam) {
             return cfg.active_period_ms;
         }
         if (uptime_ms < cfg.warmup_ms) {

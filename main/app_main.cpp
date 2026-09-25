@@ -1718,6 +1718,7 @@ void mqtt_task(void* /*arg*/) {
             const bool steam_active =
                 g_steam_active.load(std::memory_order_relaxed);
             if (steam_active != prev_steam_active) {
+                next_temp_publish_ms = now_ms;  // sample the transition, like brew start
                 const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
                 const float setpoint_c =
                     g_control.setpoint_c.load(std::memory_order_relaxed);
@@ -1824,7 +1825,9 @@ void mqtt_task(void* /*arg*/) {
 
                     next_temp_publish_ms =
                         now_ms + espid::pid::TelemetryPolicy::period_ms(
-                                     tcfg, now_ms, phase, error_c, slope_cps);
+                                     tcfg, now_ms, phase, error_c, slope_cps,
+                                     shot_running,
+                                     g_steam_active.load(std::memory_order_relaxed));
                 }
 
                 // Per-shot thermal summary, emitted once the trailing phase

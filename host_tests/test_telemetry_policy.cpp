@@ -27,6 +27,18 @@ TEST(TelemetryPolicy, BrewAndTrailingAlwaysFastest) {
     EXPECT_EQ(TelemetryPolicy::period_ms(cfg(), kAfterWarmup, HeaterPhase::kBrewTrailing, 0.0F, 0.0F), 500U);
 }
 
+// The shot switch is authoritative even while the heater phase still lags
+// at "idle" on the first record of a shot.
+TEST(TelemetryPolicy, LiveShotSwitchWinsOverLaggingPhase) {
+    EXPECT_EQ(TelemetryPolicy::period_ms(cfg(), kAfterWarmup, HeaterPhase::kIdle,
+                                         0.0F, 0.0F, /*shot_running=*/true), 500U);
+}
+
+TEST(TelemetryPolicy, LiveSteamSwitchWinsOverLaggingPhase) {
+    EXPECT_EQ(TelemetryPolicy::period_ms(cfg(), kAfterWarmup, HeaterPhase::kIdle,
+                                         0.0F, 0.0F, false, /*steam_active=*/true), 1'000U);
+}
+
 TEST(TelemetryPolicy, SteamUsesActiveRate) {
     EXPECT_EQ(TelemetryPolicy::period_ms(cfg(), kAfterWarmup, HeaterPhase::kSteam, 0.0F, 0.0F), 1'000U);
 }
