@@ -41,9 +41,13 @@ enum class Machine : std::uint8_t {
 constexpr Machine kMachine = Machine::kRancilioSilvia;
 
 // ---------------------------------------------------------------------------
-// Logging
+// Logging and heartbeat
 // ---------------------------------------------------------------------------
 constexpr const char* kLogTag = "espid";
+// app_main logs a heartbeat on this period; mqtt_task publishes a "status"
+// record on every heartbeat tick, so dashboards get a fixed-rate liveness
+// and machine-state feed independent of the adaptive telemetry cadence.
+constexpr std::uint32_t kHeartbeatPeriodMs = 5000;
 
 // ---------------------------------------------------------------------------
 // Temperature sensor (TSIC 306 via RMT / ZACwire)
@@ -463,6 +467,7 @@ enum class RecordType : std::uint8_t {
     kShotSummary = 7,
     kRefillStart = 8,
     kRefillStop  = 9,
+    kStatus      = 10,
 };
 // Telemetry cadence (see pid::TelemetryPolicy). Transients are what PID
 // tuning needs, so the rate follows the heater phase rather than a fixed

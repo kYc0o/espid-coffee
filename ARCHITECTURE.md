@@ -253,7 +253,10 @@ brewing or trailing, 1 s for steam or any excursion off setpoint, and a
 10 s heartbeat once settled. Each record carries enough state to replay
 the loop offline; `shot_summary` closes each shot, and `brew_start` /
 `brew_stop` / `steam_on` / `steam_off` / `refill_start` / `refill_stop`
-mark the mode edges.
+mark the mode edges. A `status` record goes out on every heartbeat
+(`kHeartbeatPeriodMs`, 5 s) for dashboards: the machine state the OLED
+shows (`machine_state` / `machine_state_id`), firmware version, the key
+live values, free heap and Wi-Fi RSSI.
 
 Post-steam handling. `pid::OverTempGuard` (in control_task) keeps the steam
 over-temperature limits in force after the steam switch goes off, until the

@@ -343,6 +343,11 @@ struct RefillSnapshot {
 };
 
 RefillSnapshot g_refill;
+
+// Incremented by app_main's heartbeat loop; mqtt_task publishes a status
+// record whenever it changes.
+std::atomic<std::uint32_t> g_heartbeat_tick{0};
+
 std::atomic<float> g_weight_g{0.0F};
 std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
@@ -352,6 +357,35 @@ std::atomic<bool> g_steam_active{false};
 std::atomic<bool> g_fill_complete{false};
 std::atomic<bool> g_fill_ok{false};
 SemaphoreHandle_t g_i2c_bus_mutex = nullptr;
+
+// Raw machine signals for ui::MachineStatusTracker. Both the OLED and the
+// MQTT status record interpret them, each with its own tracker, so the
+// dashboard keeps working when the display failed to initialise.
+espid::ui::RawStatusInputs gather_status_inputs() noexcept {
+    using RefillState = espid::pump::RefillSequencer::State;
+    using StopReason  = espid::pump::RefillSequencer::StopReason;
+    const auto refill_state =
+        static_cast<RefillState>(g_refill.state.load(std::memory_order_acquire));
+    const auto refill_reason =
+        static_cast<StopReason>(g_refill.reason.load(std::memory_order_relaxed));
+    const bool temp_valid = g_snapshot.valid.load(std::memory_order_acquire);
+
+    espid::ui::RawStatusInputs r{};
+    r.fill_complete =
+        cfg::pump::kTestMode || g_fill_complete.load(std::memory_order_acquire);
+    r.fill_ok          = cfg::pump::kTestMode || g_fill_ok.load(std::memory_order_acquire);
+    r.estop            = g_emergency_stop.load(std::memory_order_relaxed);
+    r.shot_running     = g_shot.running.load(std::memory_order_relaxed);
+    r.steam_active     = g_steam_active.load(std::memory_order_relaxed);
+    r.temp_c           = temp_valid ? g_snapshot.temp_c.load(std::memory_order_relaxed) : NAN;
+    r.steam_setpoint_c = g_runtime_control.steam_setpoint_c.load(std::memory_order_relaxed);
+    r.steam_cooldown   = g_steam_cooldown.load(std::memory_order_acquire);
+    r.refill_running   = refill_state == RefillState::kRunning;
+    r.refill_finished  = refill_state == RefillState::kFinished;
+    r.refill_full      = refill_reason == StopReason::kFull;
+    r.refill_timed_out = refill_reason == StopReason::kTimeout;
+    return r;
+}
 
 TickType_t ticks_from_ms(std::uint32_t ms) noexcept {
     const TickType_t t = pdMS_TO_TICKS(ms);
@@ -1643,6 +1677,10 @@ void mqtt_task(void* /*arg*/) {
         bool prev_shot_running = false;
         bool prev_steam_active = g_steam_active.load(std::memory_order_relaxed);
         std::uint64_t steam_started_ms = 0;
+        espid::ui::MachineStatusTracker status_tracker(cfg::oled::kSteamReadyOnBelowC,
+                                                       cfg::oled::kSteamReadyOffBelowC);
+        std::uint32_t last_heartbeat_tick =
+            g_heartbeat_tick.load(std::memory_order_acquire);
         std::uint32_t last_refill_start_seq =
             g_refill.start_seq.load(std::memory_order_acquire);
         std::uint32_t last_refill_stop_seq =
@@ -1715,6 +1753,9 @@ void mqtt_task(void* /*arg*/) {
                 }
             }
             prev_shot_running = shot_running;
+
+            const espid::ui::MachineStatus machine_status =
+                status_tracker.update(gather_status_inputs());
 
             // Steam switch edges: the heater runs to a different setpoint with
             // its own over-temp guard, so analysis has to segment on these.
@@ -1950,6 +1991,50 @@ void mqtt_task(void* /*arg*/) {
 
                     next_pressure_publish_ms =
                         now_ms + static_cast<std::uint64_t>(cfg::mqtt::kPressurePublishPeriodMs);
+                }
+
+                // Fixed-rate status record, one per heartbeat: liveness plus the
+                // machine state the OLED shows, for Grafana / live dashboards.
+                const std::uint32_t hb = g_heartbeat_tick.load(std::memory_order_acquire);
+                if (hb != last_heartbeat_tick) {
+                    last_heartbeat_tick = hb;
+                    wifi_ap_record_t ap{};
+                    const int rssi =
+                        (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
+                    const float temp_c = g_snapshot.temp_c.load(std::memory_order_relaxed);
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"status\",\"rec\":%u,\"uptime_ms\":%" PRIu64
+                        ",\"tick\":%" PRIu32 ",\"machine_state\":\"%s\""
+                        ",\"machine_state_id\":%u,\"fw_major\":%u,\"fw_minor\":%u"
+                        ",\"fw_patch\":%u,\"temp_c\":%.2f,\"temp_valid\":%u"
+                        ",\"setpoint_c\":%.2f,\"heater_duty_pct\":%.1f"
+                        ",\"pressure_bar\":%.3f,\"pump_pct\":%.1f"
+                        ",\"steam\":%u,\"brewing\":%u,\"estop\":%u"
+                        ",\"free_heap\":%" PRIu32 ",\"min_free_heap\":%" PRIu32
+                        ",\"wifi_rssi\":%d}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kStatus),
+                        now_ms, hb,
+                        espid::ui::to_string(machine_status),
+                        static_cast<unsigned>(machine_status),
+                        static_cast<unsigned>(cfg::kFwVersionMajor),
+                        static_cast<unsigned>(cfg::kFwVersionMinor),
+                        static_cast<unsigned>(cfg::kFwVersionPatch),
+                        static_cast<double>(temp_c),
+                        g_snapshot.valid.load(std::memory_order_acquire) ? 1U : 0U,
+                        static_cast<double>(g_control.setpoint_c.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_control_duty_pct.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_pressure.pressure_bar.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_pump_power_pct.load(std::memory_order_relaxed)),
+                        g_steam_active.load(std::memory_order_relaxed) ? 1U : 0U,
+                        shot_running ? 1U : 0U,
+                        g_emergency_stop.load(std::memory_order_relaxed) ? 1U : 0U,
+                        static_cast<std::uint32_t>(esp_get_free_heap_size()),
+                        static_cast<std::uint32_t>(esp_get_minimum_free_heap_size()),
+                        rssi);
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
+                        publish_payload(payload);
+                    }
                 }
             } else {
                 next_temp_publish_ms = now_ms;
@@ -2268,10 +2353,8 @@ void display_task(void* arg) {
     bool          was_shot_active = false;
     std::uint64_t post_shot_until_ms = 0;
     std::uint32_t lock_div = 0;
-    espid::ui::SteamReadyTracker steam_ready(cfg::oled::kSteamReadyOnBelowC,
-                                             cfg::oled::kSteamReadyOffBelowC);
-    bool cooldown_was = false;
-    bool refilled_this_cooldown = false;
+    espid::ui::MachineStatusTracker status_tracker(cfg::oled::kSteamReadyOnBelowC,
+                                                   cfg::oled::kSteamReadyOffBelowC);
 
     for (;;) {
         const std::uint64_t now_ms =
@@ -2322,42 +2405,12 @@ void display_task(void* arg) {
         }
 
         // What the machine is doing, and what the operator should do next.
-        using RefillState = espid::pump::RefillSequencer::State;
-        const auto refill_state =
-            static_cast<RefillState>(g_refill.state.load(std::memory_order_acquire));
-        espid::ui::StatusInputs status_in{};
-        status_in.fill_complete =
-            cfg::pump::kTestMode || g_fill_complete.load(std::memory_order_acquire);
-        status_in.fill_ok =
-            cfg::pump::kTestMode || g_fill_ok.load(std::memory_order_acquire);
-        status_in.estop = g_emergency_stop.load(std::memory_order_relaxed);
-        status_in.shot_running = shot_active;
-        status_in.steam_active = steam_active;
-        status_in.steam_ready = steam_ready.update(
-            steam_active, (valid ? t : NAN), steam_setpoint_c);
-        status_in.steam_cooldown = g_steam_cooldown.load(std::memory_order_acquire);
-        status_in.refill_running = refill_state == RefillState::kRunning;
-        status_in.refill_waiting_release = refill_state == RefillState::kFinished;
-        const auto refill_reason = static_cast<espid::pump::RefillSequencer::StopReason>(
-            g_refill.reason.load(std::memory_order_relaxed));
-        status_in.refill_timed_out =
-            refill_reason == espid::pump::RefillSequencer::StopReason::kTimeout;
-        // Each steam session gets its own cool-down; remember whether its
-        // boiler has already been confirmed full.
-        if (status_in.steam_cooldown && !cooldown_was) {
-            refilled_this_cooldown = false;
-        }
-        if (refill_state == RefillState::kFinished &&
-            refill_reason == espid::pump::RefillSequencer::StopReason::kFull) {
-            refilled_this_cooldown = true;
-        }
-        cooldown_was = status_in.steam_cooldown;
-        status_in.refilled_this_cooldown = refilled_this_cooldown;
-        const espid::ui::MachineStatus status = espid::ui::select_status(status_in);
+        const espid::ui::RawStatusInputs status_raw = gather_status_inputs();
+        const espid::ui::MachineStatus status = status_tracker.update(status_raw);
         const std::uint64_t refill_started_ms =
             g_refill.started_ms.load(std::memory_order_relaxed);
         const std::uint32_t refill_elapsed_s =
-            (status_in.refill_running && now_ms >= refill_started_ms)
+            (status_raw.refill_running && now_ms >= refill_started_ms)
                 ? static_cast<std::uint32_t>((now_ms - refill_started_ms) / 1000U)
                 : 0U;
         char status_str[24];
@@ -3384,7 +3437,9 @@ extern "C" void app_main(void) {
     // no frames arrive (e.g. sensor disconnected).
     std::uint32_t tick = 0;
     while (true) {
-        ESP_LOGI(kTag, "heartbeat tick=%" PRIu32, tick++);
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        ESP_LOGI(kTag, "heartbeat tick=%" PRIu32, tick);
+        g_heartbeat_tick.store(tick, std::memory_order_release);
+        ++tick;
+        vTaskDelay(pdMS_TO_TICKS(cfg::kHeartbeatPeriodMs));
     }
 }

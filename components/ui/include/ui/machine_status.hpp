@@ -16,7 +16,13 @@
 // SteamReadyTracker adds hysteresis to "steam ready" so the label does not
 // flicker as the boiler temperature crosses a single threshold.
 //
-// Not thread-safe; drive from the display task.
+// MachineStatusTracker owns that state plus the "already refilled during
+// this cool-down" flag and turns raw machine signals into a MachineStatus.
+// The OLED and the MQTT status record each run one, so the dashboard keeps
+// working when the display failed to initialise. `to_string()` gives the
+// stable machine-readable names published over MQTT.
+//
+// Not thread-safe; each task drives its own instance.
 
 #pragma once
 
@@ -88,6 +94,26 @@ constexpr MachineStatus select_status(const StatusInputs& in) noexcept {
     return MachineStatus::kIdle;
 }
 
+// Stable identifiers for telemetry and dashboards (unlike the header text,
+// which carries a live counter while refilling).
+constexpr const char* to_string(MachineStatus s) noexcept {
+    switch (s) {
+        case MachineStatus::kIdle:                 return "idle";
+        case MachineStatus::kFilling:              return "filling";
+        case MachineStatus::kFillFailed:           return "fill_failed";
+        case MachineStatus::kEmergencyStop:        return "emergency_stop";
+        case MachineStatus::kBrewing:              return "brewing";
+        case MachineStatus::kSteamHeating:         return "steam_heating";
+        case MachineStatus::kSteamReady:           return "steam_ready";
+        case MachineStatus::kRefillPrompt:         return "refill_prompt";
+        case MachineStatus::kRefilling:            return "refilling";
+        case MachineStatus::kRefillFullRelease:    return "refill_full";
+        case MachineStatus::kRefillTimeoutRelease: return "refill_timeout";
+        case MachineStatus::kCoolingDown:          return "cooling_down";
+    }
+    return "unknown";
+}
+
 // Prompts that ask the operator to do something.
 constexpr bool needs_attention(MachineStatus s) noexcept {
     return s == MachineStatus::kRefillPrompt ||
@@ -149,6 +175,65 @@ class SteamReadyTracker {
     float on_below_c_;
     float off_below_c_;
     bool  ready_ = false;
+};
+
+// Raw machine signals, before any interpretation.
+struct RawStatusInputs {
+    bool  fill_complete    = true;
+    bool  fill_ok          = true;
+    bool  estop            = false;
+    bool  shot_running     = false;
+    bool  steam_active     = false;
+    float temp_c           = NAN;  // NaN when the sample is not valid
+    float steam_setpoint_c = NAN;
+    bool  steam_cooldown   = false;
+    bool  refill_running   = false;
+    bool  refill_finished  = false;  // finished, triggering switch still on
+    bool  refill_full      = false;  // last refill stopped on confirmed pressure
+    bool  refill_timed_out = false;  // last refill stopped on the timeout
+};
+
+class MachineStatusTracker {
+   public:
+    MachineStatusTracker(float steam_ready_on_below_c,
+                         float steam_ready_off_below_c) noexcept
+        : steam_ready_(steam_ready_on_below_c, steam_ready_off_below_c) {}
+
+    MachineStatus update(const RawStatusInputs& raw) noexcept {
+        // Each steam session gets its own cool-down; remember whether its
+        // boiler has already been confirmed full.
+        if (raw.steam_cooldown && !cooldown_was_) {
+            refilled_this_cooldown_ = false;
+        }
+        if (raw.refill_finished && raw.refill_full) {
+            refilled_this_cooldown_ = true;
+        }
+        cooldown_was_ = raw.steam_cooldown;
+
+        StatusInputs in{};
+        in.fill_complete          = raw.fill_complete;
+        in.fill_ok                = raw.fill_ok;
+        in.estop                  = raw.estop;
+        in.shot_running           = raw.shot_running;
+        in.steam_active           = raw.steam_active;
+        in.steam_ready            = steam_ready_.update(raw.steam_active, raw.temp_c,
+                                                        raw.steam_setpoint_c);
+        in.steam_cooldown         = raw.steam_cooldown;
+        in.refill_running         = raw.refill_running;
+        in.refill_waiting_release = raw.refill_finished;
+        in.refill_timed_out       = raw.refill_timed_out;
+        in.refilled_this_cooldown = refilled_this_cooldown_;
+        status_ = select_status(in);
+        return status_;
+    }
+
+    MachineStatus status() const noexcept { return status_; }
+
+   private:
+    SteamReadyTracker steam_ready_;
+    bool              cooldown_was_           = false;
+    bool              refilled_this_cooldown_ = false;
+    MachineStatus     status_                 = MachineStatus::kIdle;
 };
 
 }  // namespace espid::ui

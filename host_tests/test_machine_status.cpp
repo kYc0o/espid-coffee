@@ -138,4 +138,68 @@ TEST(SteamReadyTracker, ResetsWhenSteamOffOrReadingBad) {
     EXPECT_FALSE(t.update(true, NAN, 130.0F));
 }
 
+using espid::ui::MachineStatusTracker;
+using espid::ui::RawStatusInputs;
+
+TEST(MachineStatus, TelemetryNamesAreStableAndUnique) {
+    EXPECT_STREQ(espid::ui::to_string(MachineStatus::kIdle), "idle");
+    EXPECT_STREQ(espid::ui::to_string(MachineStatus::kRefilling), "refilling");
+    EXPECT_STREQ(espid::ui::to_string(MachineStatus::kSteamReady), "steam_ready");
+    for (int a = 0; a <= static_cast<int>(MachineStatus::kCoolingDown); ++a) {
+        for (int b = a + 1; b <= static_cast<int>(MachineStatus::kCoolingDown); ++b) {
+            EXPECT_STRNE(espid::ui::to_string(static_cast<MachineStatus>(a)),
+                         espid::ui::to_string(static_cast<MachineStatus>(b)));
+        }
+    }
+}
+
+// The tracker reproduces the full post-steam walkthrough from raw signals.
+TEST(MachineStatusTracker, SteamRefillAndCooldownFromRawSignals) {
+    MachineStatusTracker t(2.0F, 5.0F);
+    RawStatusInputs r{};
+    r.steam_setpoint_c = 130.0F;
+
+    r.steam_active = true;
+    r.temp_c       = 110.0F;
+    EXPECT_EQ(t.update(r), MachineStatus::kSteamHeating);
+    r.temp_c = 128.5F;
+    EXPECT_EQ(t.update(r), MachineStatus::kSteamReady);
+
+    r.steam_active   = false;
+    r.steam_cooldown = true;
+    EXPECT_EQ(t.update(r), MachineStatus::kRefillPrompt);
+
+    r.refill_running = true;
+    EXPECT_EQ(t.update(r), MachineStatus::kRefilling);
+
+    r.refill_running  = false;
+    r.refill_finished = true;
+    r.refill_full     = true;
+    EXPECT_EQ(t.update(r), MachineStatus::kRefillFullRelease);
+
+    // Switch released while the boiler is still above the cool-down exit.
+    r.refill_finished = false;
+    EXPECT_EQ(t.update(r), MachineStatus::kCoolingDown);
+    EXPECT_EQ(t.status(), MachineStatus::kCoolingDown);
+
+    // A new steam session re-arms the refill prompt.
+    r.steam_cooldown = false;
+    r.steam_active   = true;
+    (void)t.update(r);
+    r.steam_active   = false;
+    r.steam_cooldown = true;
+    EXPECT_EQ(t.update(r), MachineStatus::kRefillPrompt);
+}
+
+TEST(MachineStatusTracker, TimedOutRefillStillPromptsAgain) {
+    MachineStatusTracker t(2.0F, 5.0F);
+    RawStatusInputs r{};
+    r.steam_cooldown   = true;
+    r.refill_finished  = true;
+    r.refill_timed_out = true;
+    EXPECT_EQ(t.update(r), MachineStatus::kRefillTimeoutRelease);
+    r.refill_finished = false;
+    EXPECT_EQ(t.update(r), MachineStatus::kRefillPrompt);  // not confirmed full
+}
+
 }  // namespace
