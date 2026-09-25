@@ -136,6 +136,11 @@ constexpr float         kEmergencyResetTempC = 100.0F;
 // comfortably below kSteamEmergencyStopTempC for overshoot headroom.
 constexpr float         kSteamEmergencyStopTempC  = 165.0F;
 constexpr float         kSteamEmergencyResetTempC = 145.0F;
+// After the steam switch goes off the boiler is still far above the brew stop
+// threshold, so the steam limits stay in force (a "cool-down") until it has
+// fallen this far below kEmergencyStopTempC. Without it every normal steam
+// session tripped the brew-mode stop on the way back down.
+constexpr float         kSteamCooldownMarginC     = 5.0F;
 // Identified from a cold-start log (2026-09-16): at 100 % the boiler climbs
 // 0.48 °C/s after ~4 s dead time and two lags of ~12 s and ~10 s (≈27 s of
 // heat "in flight"); idle loss needs ~5.6 % duty at 94.5 °C. Tv ≈ that lag

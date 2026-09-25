@@ -36,6 +36,7 @@
 #include "heater/slow_pwm_ssr_heater.hpp"
 #include "pid/controller.hpp"
 #include "pid/heater_phase.hpp"
+#include "pid/over_temp_guard.hpp"
 #include "pid/telemetry_policy.hpp"
 #include "pid/shot_thermal_stats.hpp"
 #include "pump/psm_pump.hpp"
@@ -1891,6 +1892,10 @@ void control_task(void* arg) {
 
     espid::pid::Controller controller;
     espid::pid::HeaterPhaseTracker phase_tracker;
+    espid::pid::OverTempGuard over_temp(espid::pid::OverTempGuard::Config{
+        {cfg::pid::kEmergencyStopTempC, cfg::pid::kEmergencyResetTempC},
+        {cfg::pid::kSteamEmergencyStopTempC, cfg::pid::kSteamEmergencyResetTempC},
+        cfg::pid::kSteamCooldownMarginC});
     espid::pid::ShotThermalStats shot_stats;
     bool heater_ready = false;
 
@@ -1944,31 +1949,35 @@ void control_task(void* arg) {
             (now_ms - sample_ms) <= freshness_budget_ms;
 
         // Steam mode heats the boiler far past the brew over-temp ceiling, so
-        // the emergency thresholds must track the active mode.
+        // the stop thresholds track the mode, with a cool-down after steam.
         const bool steam_active =
             g_steam_active.load(std::memory_order_relaxed);
-        const float emergency_stop_c = steam_active
-            ? cfg::pid::kSteamEmergencyStopTempC
-            : cfg::pid::kEmergencyStopTempC;
-        const float emergency_reset_c = steam_active
-            ? cfg::pid::kSteamEmergencyResetTempC
-            : cfg::pid::kEmergencyResetTempC;
-
-        if (sample_fresh && temp_c >= emergency_stop_c) {
-            const bool was_stopped = g_emergency_stop.exchange(true, std::memory_order_relaxed);
-            if (!was_stopped) {
+        {
+            const auto tr = over_temp.update(steam_active,
+                                             sample_fresh ? temp_c : NAN);
+            const auto& lim = over_temp.limits();
+            if (tr.cooldown_started) {
+                ESP_LOGI(kTag, "over-temp: steam off at %.2fC - steam limits held "
+                         "until T < %.1fC",
+                         static_cast<double>(temp_c),
+                         static_cast<double>(over_temp.cooldown_exit_c()));
+            }
+            if (tr.cooldown_ended) {
+                ESP_LOGI(kTag, "over-temp: cool-down done at %.2fC - brew limits re-armed",
+                         static_cast<double>(temp_c));
+            }
+            if (tr.tripped) {
                 ESP_LOGE(kTag, "EMERGENCY STOP: temp %.2fC >= %.2fC",
                          static_cast<double>(temp_c),
-                         static_cast<double>(emergency_stop_c));
+                         static_cast<double>(lim.stop_c));
             }
-        } else if (g_emergency_stop.load(std::memory_order_relaxed) &&
-                   sample_fresh &&
-                   temp_c <= emergency_reset_c) {
-            g_emergency_stop.store(false, std::memory_order_relaxed);
-            ESP_LOGW(kTag, "Emergency stop reset: temp %.2fC <= %.2fC",
-                     static_cast<double>(temp_c),
-                     static_cast<double>(emergency_reset_c));
+            if (tr.released) {
+                ESP_LOGW(kTag, "Emergency stop reset: temp %.2fC <= %.2fC",
+                         static_cast<double>(temp_c),
+                         static_cast<double>(lim.reset_c));
+            }
         }
+        g_emergency_stop.store(over_temp.tripped(), std::memory_order_relaxed);
         const bool emergency_stop = g_emergency_stop.load(std::memory_order_relaxed);
 
         const bool shot_running = g_shot.running.load(std::memory_order_relaxed);
