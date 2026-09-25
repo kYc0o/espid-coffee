@@ -410,7 +410,7 @@ constexpr std::size_t   kPasswordMaxLen = 64;
 constexpr std::size_t   kClientIdMaxLen = 64;
 constexpr std::size_t   kUriMaxLen      = 96;
 constexpr std::size_t   kTopicMaxLen    = 96;
-constexpr std::size_t   kPayloadMaxLen  = 448;  // full control record + slack
+constexpr std::size_t   kPayloadMaxLen  = 512;  // full control record; worst case 458
 // Numeric mirror of each record's "type" string. The Hono->Kafka->Telegraf
 // pipeline's JSON parser keeps numeric fields and drops strings that are not
 // declared as tags, so the strings stay for human/MQTT consumers while these

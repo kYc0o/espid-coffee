@@ -35,6 +35,7 @@
 #include "hal_cpp/result.hpp"
 #include "heater/slow_pwm_ssr_heater.hpp"
 #include "pid/controller.hpp"
+#include "pid/duty_accumulator.hpp"
 #include "pid/heater_phase.hpp"
 #include "pid/over_temp_guard.hpp"
 #include "pid/telemetry_policy.hpp"
@@ -274,6 +275,9 @@ struct ControlSettingsValues {
 
 RuntimeControlSettings g_runtime_control;
 std::atomic<float> g_control_duty_pct{0.0F};
+// Every applied heater duty, drained into each telemetry record so short
+// pulses between publishes still count toward the delivered energy.
+espid::pid::DutyAccumulator g_duty_accum;
 std::atomic<float> g_pump_power_pct{0.0F};
 
 // Heater-loop state published every control step for telemetry. Scalars
@@ -1730,6 +1734,8 @@ void mqtt_task(void* /*arg*/) {
                         g_snapshot.temp_c.load(std::memory_order_relaxed);
                     const float duty_pct =
                         g_control_duty_pct.load(std::memory_order_relaxed);
+                    float duty_avg_pct = duty_pct;
+                    (void)g_duty_accum.take(&duty_avg_pct);
                     const auto phase = static_cast<espid::pid::HeaterPhase>(
                         g_control.phase.load(std::memory_order_relaxed));
                     const float setpoint_c =
@@ -1752,7 +1758,8 @@ void mqtt_task(void* /*arg*/) {
                         ",\"phase\":\"%s\",\"phase_id\":%u"
                         ",\"temp_c\":%.2f,\"temp_valid\":%u"
                         ",\"setpoint_c\":%.2f,\"error_c\":%.2f,\"slope_cps\":%.3f"
-                        ",\"heater_duty_pct\":%.1f,\"p\":%.1f,\"i\":%.1f,\"d\":%.1f"
+                        ",\"heater_duty_pct\":%.1f,\"heater_duty_avg_pct\":%.2f"
+                        ",\"p\":%.1f,\"i\":%.1f,\"d\":%.1f"
                         ",\"u\":%.1f,\"kp\":%.2f,\"ki\":%.4f,\"kd\":%.1f"
                         ",\"ff\":%u,\"steam\":%u,\"estop\":%u,\"brewing\":%u"
                         ",\"shot_s\":%.1f,\"pressure_bar\":%.3f,\"pump_pct\":%.1f}",
@@ -1766,6 +1773,7 @@ void mqtt_task(void* /*arg*/) {
                         static_cast<double>(error_c),
                         static_cast<double>(slope_cps),
                         static_cast<double>(duty_pct),
+                        static_cast<double>(duty_avg_pct),
                         static_cast<double>(g_control.p_term.load(std::memory_order_relaxed)),
                         static_cast<double>(g_control.i_term.load(std::memory_order_relaxed)),
                         static_cast<double>(g_control.d_term.load(std::memory_order_relaxed)),
@@ -1861,6 +1869,10 @@ void mqtt_task(void* /*arg*/) {
             } else {
                 next_temp_publish_ms = now_ms;
                 next_pressure_publish_ms = now_ms;
+                // Nothing is being published: keep the averaging window short so
+                // the first record after a reconnect covers only recent control.
+                float discard = 0.0F;
+                (void)g_duty_accum.take(&discard);
             }
 
             if (now_ms >= next_runtime_check_ms) {
@@ -2049,6 +2061,7 @@ void control_task(void* arg) {
         }
 
         g_control_duty_pct.store(duty_pct, std::memory_order_relaxed);
+        g_duty_accum.add(duty_pct);
 
         {
             const auto& t = controller.last_terms();
