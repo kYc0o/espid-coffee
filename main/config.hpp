@@ -303,14 +303,28 @@ constexpr std::uint32_t  kRefillMaxDurationMs   = 60'000;
 // than the shot itself. The integral now spans the output range (Tn = 5 s)
 // and pump_task runs conditional integration so the saturated ramp-up to
 // pressure does not wind it up.
+//
+// Tn = 5 s was still too slow: as the puck erodes during a shot the pump
+// needs steadily more power (~3.7 %/s on 2026-09-25), and a PI loop tracks
+// such a ramp with a steady error of rate / Ki -- 1.2 bar at Ki = 3, which is
+// the plateau at 8.4 bar and sag to 7.6 bar that shot showed. The pressure
+// responds to the pump within about a second, so Tn = 1.5 s is still
+// conservative; a model fitted to that shot puts Ki = 10 at 9.0-9.1 bar
+// through mid-shot with ~0.1 bar overshoot and no ringing. Late in a shot
+// the pump saturates (97 % at 8.1 bar) and no gain can help.
 constexpr float          kPressureSetpointBar = 9.0F;
 constexpr float          kPidKp               = 15.0F;
-constexpr float          kPidKi               = 3.0F;   // Kp / Tn, Tn = 5 s
+constexpr float          kPidKi               = 10.0F;  // Kp / Tn, Tn = 1.5 s
 constexpr float          kPidKd               = 0.8F;
 constexpr float          kPidOutputMin        = 0.0F;
 constexpr float          kPidOutputMax        = 100.0F;
 constexpr float          kPidIntegralMin      = -20.0F;
 constexpr float          kPidIntegralMax      = 100.0F;
+// Accepted range for the web-UI / NVS pump gains.
+constexpr float          kPidGainMin          = 0.0F;
+constexpr float          kPidKpMax            = 100.0F;
+constexpr float          kPidKiMax            = 30.0F;  // was 10: leave room above the default
+constexpr float          kPidKdMax            = 50.0F;
 constexpr float          kPidSamplePeriodS    = 0.1F;  // 10 Hz
 constexpr std::uint32_t  kTaskStackBytes      = 4096;
 constexpr std::uint32_t  kTaskPriority        = 5;

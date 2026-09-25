@@ -738,9 +738,9 @@ void load_runtime_control_settings_from_nvs() noexcept {
          &v.brew_setpoint_c);
     load(kCfgSteamSetpoint, cfg::pid::kSteamSetpointMinC, cfg::pid::kSteamSetpointMaxC,
          &v.steam_setpoint_c);
-    load(kCfgPumpKp, 0.0F, 100.0F, &v.pump_kp);
-    load(kCfgPumpKi, 0.0F, 10.0F, &v.pump_ki);
-    load(kCfgPumpKd, 0.0F, 50.0F, &v.pump_kd);
+    load(kCfgPumpKp, cfg::pump::kPidGainMin, cfg::pump::kPidKpMax, &v.pump_kp);
+    load(kCfgPumpKi, cfg::pump::kPidGainMin, cfg::pump::kPidKiMax, &v.pump_ki);
+    load(kCfgPumpKd, cfg::pump::kPidGainMin, cfg::pump::kPidKdMax, &v.pump_kd);
     load(kCfgBrewKp, cfg::pid::kKpMin, cfg::pid::kKpMax, &v.brew_kp);
     load(kCfgBrewTn, cfg::pid::kBrewTnMinS, cfg::pid::kTnMaxS, &v.brew_tn_s);
     load(kCfgBrewTv, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &v.brew_tv_s);
@@ -1164,13 +1164,16 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     if (!parse_float_in_range(pid_tv_txt, cfg::pid::kTvMinS, cfg::pid::kTvMaxS, &v.pid_tv_s)) {
         return reject_bad_request("Invalid pid_tv");
     }
-    if (!parse_float_in_range(pump_kp_txt, 0.0F, 100.0F, &v.pump_kp)) {
+    if (!parse_float_in_range(pump_kp_txt, cfg::pump::kPidGainMin,
+                              cfg::pump::kPidKpMax, &v.pump_kp)) {
         return reject_bad_request("Invalid pump_kp");
     }
-    if (!parse_float_in_range(pump_ki_txt, 0.0F, 10.0F, &v.pump_ki)) {
+    if (!parse_float_in_range(pump_ki_txt, cfg::pump::kPidGainMin,
+                              cfg::pump::kPidKiMax, &v.pump_ki)) {
         return reject_bad_request("Invalid pump_ki");
     }
-    if (!parse_float_in_range(pump_kd_txt, 0.0F, 50.0F, &v.pump_kd)) {
+    if (!parse_float_in_range(pump_kd_txt, cfg::pump::kPidGainMin,
+                              cfg::pump::kPidKdMax, &v.pump_kd)) {
         return reject_bad_request("Invalid pump_kd");
     }
     if (!parse_float_in_range(brew_kp_txt, cfg::pid::kKpMin, cfg::pid::kKpMax, &v.brew_kp)) {
