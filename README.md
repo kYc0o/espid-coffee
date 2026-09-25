@@ -28,6 +28,15 @@ idf.py build flash monitor
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#12-roadmap) for the live phase table.
 
+## AI-assisted development
+
+Parts of this repository (code, tests and documentation) were written with
+the help of AI coding assistants, including Anthropic's Claude, OpenAI models
+and local models run through Ollama, alongside code written by hand. The work
+was interleaved across tools and sessions, so it is not possible to say which
+parts came from which source, and commits do not attribute authorship to any
+particular tool.
+
 ## License
 
 MIT (pending — see LICENSE in a future commit).
