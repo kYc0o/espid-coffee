@@ -89,6 +89,7 @@ add_executable(espid_unit_tests
     test_telemetry_policy.cpp
     test_over_temp_guard.cpp
     test_duty_accumulator.cpp
+    test_refill_sequencer.cpp
     test_brew.cpp
     test_heater.cpp
     test_psm.cpp
