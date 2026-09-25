@@ -25,7 +25,7 @@ namespace espid::config {
 constexpr const char* kFirmwareName    = "ESPID-Coffee";
 constexpr std::uint8_t kFwVersionMajor = 0;
 constexpr std::uint8_t kFwVersionMinor = 0;
-constexpr std::uint8_t kFwVersionPatch = 6;
+constexpr std::uint8_t kFwVersionPatch = 7;
 constexpr const char*  kFwBranch       = "main";
 
 // ---------------------------------------------------------------------------
