@@ -44,7 +44,7 @@ this file is the human-facing companion for bench and in-machine work.
 | Heater **SSR** | `GPIO47` | out | **10 kΩ → GND** | Pull-down keeps heater OFF at boot. Isolated SSR. |
 | Brew switch | `GPIO5` | in | internal pull-**down** | Switch sources 3V3 when closed → active-high. |
 | Steam switch | `GPIO4` | in | internal pull-**down** | Switch to 3V3; `kPulldownEnable = true`. |
-| Valve / 3-way solenoid | `GPIO16` | out | none | Open during brew AND during startup fill. |
+| Valve / 3-way solenoid | `GPIO16` | out | none | Open during brew only. Closed during startup fill and post-steam refill, so the pump can only push water into the boiler (through the check valve). |
 | Pump **neutral SSR** | `GPIO15` | — | — | **Removed** — pump neutral now wired directly to mains. `kSsrEnabled = false`. |
 | Pump **PSM** triac gate | `GPIO17` | out | none | To dimmer/triac gate. Pulse-skip (integral-cycle) firing at the zero-cross. |
 | Pump **zero-cross** input | `GPIO18` | in | **10 kΩ → 3V3** pull-up + **2.2 kΩ series + 100 nF → GND** RC low-pass | Opto ZC, ~100 Hz at 50 Hz mains. RC τ ≈ 220 µs (f_c ≈ 720 Hz). S3 pin glitch filter also on. |
