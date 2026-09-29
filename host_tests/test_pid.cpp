@@ -341,4 +341,52 @@ TEST(PidController, ConditionalIntegrationHoldsWhileDerivativeKicksUp) {
     EXPECT_FLOAT_EQ(pid.integral_state(), i0);
 }
 
+Controller::Config banded(float band) {
+    Controller::Config c{};
+    c.kp              = 10.0F;
+    c.ki              = 1.0F;
+    c.output_min      = 0.0F;
+    c.output_max      = 100.0F;
+    c.integral_min    = -50.0F;
+    c.integral_max    =  50.0F;
+    c.sample_period_s = 1.0F;
+    c.integral_band   = band;
+    return c;
+}
+
+TEST(PidController, IntegralBandZeroIntegratesAtAnyError) {
+    Controller pid(banded(0.0F));
+    (void)pid.update(94.0F, 87.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 7.0F);
+}
+
+// Post-flush recovery: the boiler coasts up from 7 C below setpoint on
+// stored heat with D holding the output at 0. Integrating that error
+// winds the integral up and parks the boiler above setpoint afterwards.
+TEST(PidController, IntegralHoldsOutsideTheBand) {
+    Controller pid(banded(2.0F));
+    for (int i = 0; i < 10; ++i) {
+        (void)pid.update(94.0F, 87.0F);
+        (void)pid.update(94.0F, 101.0F);
+    }
+    EXPECT_FLOAT_EQ(pid.integral_state(), 0.0F);
+    EXPECT_FLOAT_EQ(pid.last_terms().i, 0.0F);
+}
+
+TEST(PidController, IntegralRunsInsideTheBandIncludingItsEdge) {
+    Controller pid(banded(2.0F));
+    (void)pid.update(94.0F, 93.0F);   // error  1
+    (void)pid.update(94.0F, 92.0F);   // error  2: on the edge, still inside
+    (void)pid.update(94.0F, 94.5F);   // error -0.5
+    EXPECT_FLOAT_EQ(pid.integral_state(), 2.5F);
+}
+
+TEST(PidController, IntegralBandKeepsTheHeldValueInTheOutput) {
+    Controller pid(banded(2.0F));
+    (void)pid.update(94.0F, 93.0F);   // I = 1
+    // Outside the band: I is held, not dropped, so the output stays bumpless.
+    EXPECT_FLOAT_EQ(pid.update(94.0F, 90.0F), 10.0F * 4.0F + 1.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), 1.0F);
+}
+
 }  // namespace

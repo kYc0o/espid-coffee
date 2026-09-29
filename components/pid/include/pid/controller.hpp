@@ -25,6 +25,11 @@
 //     to setpoint on stored heat with D braking the heater to 0 %:
 //     integrating that error would park the integral above the holding
 //     value. Saturation caused by P or I still lets the integral unwind.
+//   - Optional integral band (`integral_band`): the integrator only runs
+//     while |error| <= band. Far from setpoint the error says nothing
+//     about the holding output, only about a transient (a flush, a cold
+//     start), and integrating it winds the integral away from the value
+//     it will need on arrival. 0 = integrate at any error.
 //   - The integrator stores the already-`ki`-scaled sum, so swapping
 //     gains with `set_config()` mid-run is bumpless. `ki == 0` freezes
 //     the integral at its current contribution.
@@ -48,6 +53,7 @@ class Controller {
         float sample_period_s = 0.1F;  // 10 Hz default
         float d_filter_tau_s  = 0.0F;  // slope low-pass time constant; 0 = off
         bool  conditional_integration = false;
+        float integral_band   = 0.0F;  // integrate only if |error| <= band; 0 = off
     };
 
     // Per-term breakdown of the most recent `update()`, for diagnostics.
@@ -81,8 +87,13 @@ class Controller {
     float update(float setpoint, float measurement) noexcept {
         const float error = setpoint - measurement;
 
-        // Integral with clamp anti-windup.
-        float integral = integral_ + cfg_.ki * error * cfg_.sample_period_s;
+        // Integral with clamp anti-windup; held outside the integral band.
+        const bool in_band = cfg_.integral_band <= 0.0F ||
+                             (error <= cfg_.integral_band && error >= -cfg_.integral_band);
+        float integral = integral_;
+        if (in_band) {
+            integral += cfg_.ki * error * cfg_.sample_period_s;
+        }
         if (integral > cfg_.integral_max) integral = cfg_.integral_max;
         if (integral < cfg_.integral_min) integral = cfg_.integral_min;
 
