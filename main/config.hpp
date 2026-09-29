@@ -173,6 +173,10 @@ constexpr float         kOutputMax      = 100.0F;
 // actually needs, so P and D decide the approach.
 constexpr float         kIntegralMin    = -10.0F;
 constexpr float         kIntegralMax    = 15.0F;
+// The integral only runs within this band around setpoint. Further out the
+// error reflects a transient (cold start, flush, shot), not the holding
+// duty. Idle hunting stays inside it (±0.4 °C measured 2026-09-27).
+constexpr float         kIntegralBandC  = 2.0F;
 constexpr float         kSamplePeriodS  = 0.2F;   // 5 Hz loop
 // First-order low-pass on dT/dt feeding the D term. The TSIC LSB is
 // ~0.098 °C, so at 5 Hz one LSB flicker reads as ±0.49 °C/s; unfiltered,
