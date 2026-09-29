@@ -299,4 +299,46 @@ TEST(PidController, ConditionalIntegrationStillUnwindsAgainstSaturation) {
     EXPECT_FLOAT_EQ(pid.integral_state(), 19.5F);
 }
 
+// Boiler coasting up on stored heat: below setpoint (error > 0) but D brakes
+// the output to 0. Integrating there only winds the integral up.
+TEST(PidController, ConditionalIntegrationHoldsWhileDerivativeBrakes) {
+    Controller::Config c{};
+    c.kp                      = 10.0F;
+    c.ki                      = 1.0F;
+    c.kd                      = 100.0F;
+    c.output_min              = 0.0F;
+    c.output_max              = 100.0F;
+    c.integral_min            = -50.0F;
+    c.integral_max            =  50.0F;
+    c.sample_period_s         = 1.0F;
+    c.conditional_integration = true;
+    Controller pid(c);
+
+    (void)pid.update(94.0F, 90.0F);                   // first sample: no D yet
+    const float i0 = pid.integral_state();
+    EXPECT_FLOAT_EQ(pid.update(94.0F, 91.0F), 0.0F);  // +1 C/s: D = -100
+    EXPECT_FLOAT_EQ(pid.update(94.0F, 92.0F), 0.0F);
+    EXPECT_FLOAT_EQ(pid.integral_state(), i0);
+}
+
+// Mirror case: above setpoint but falling fast, D drives the output high.
+TEST(PidController, ConditionalIntegrationHoldsWhileDerivativeKicksUp) {
+    Controller::Config c{};
+    c.kp                      = 10.0F;
+    c.ki                      = 1.0F;
+    c.kd                      = 100.0F;
+    c.output_min              = 0.0F;
+    c.output_max              = 100.0F;
+    c.integral_min            = -50.0F;
+    c.integral_max            =  50.0F;
+    c.sample_period_s         = 1.0F;
+    c.conditional_integration = true;
+    Controller pid(c);
+
+    (void)pid.update(94.0F, 98.0F);
+    const float i0 = pid.integral_state();
+    EXPECT_FLOAT_EQ(pid.update(94.0F, 96.0F), 100.0F);  // -2 C/s: D = +200
+    EXPECT_FLOAT_EQ(pid.integral_state(), i0);
+}
+
 }  // namespace

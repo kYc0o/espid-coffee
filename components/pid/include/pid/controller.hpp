@@ -20,7 +20,11 @@
 //     integrator holds while the output is saturated in the direction the
 //     error is pushing. Without it a long saturated run (e.g. boiler cold
 //     start at 100 %) parks the integral at its clamp and it has to unwind
-//     through an overshoot.
+//     through an overshoot. It also holds while the D term drives the
+//     output into saturation against the error, e.g. a boiler coasting up
+//     to setpoint on stored heat with D braking the heater to 0 %:
+//     integrating that error would park the integral above the holding
+//     value. Saturation caused by P or I still lets the integral unwind.
 //   - The integrator stores the already-`ki`-scaled sum, so swapping
 //     gains with `set_config()` mid-run is bumpless. `ki == 0` freezes
 //     the integral at its current contribution.
@@ -101,9 +105,12 @@ class Controller {
 
         const float p_term = cfg_.kp * error;
         float out = p_term + integral + d_term;
-        if (cfg_.conditional_integration &&
-            ((out > cfg_.output_max && error > 0.0F) ||
-             (out < cfg_.output_min && error < 0.0F))) {
+        const bool pushes_into_sat = (out > cfg_.output_max && error > 0.0F) ||
+                                     (out < cfg_.output_min && error < 0.0F);
+        const bool d_brakes_into_sat =
+            (out < cfg_.output_min && error > 0.0F && d_term < 0.0F) ||
+            (out > cfg_.output_max && error < 0.0F && d_term > 0.0F);
+        if (cfg_.conditional_integration && (pushes_into_sat || d_brakes_into_sat)) {
             integral = integral_;
             out      = p_term + integral + d_term;
         }
