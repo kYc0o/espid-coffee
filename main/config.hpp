@@ -295,11 +295,14 @@ constexpr std::uint32_t  kStartupFillConfirmSamples = 3;
 // cold water from hitting the element as a slug. The timeout is the backstop
 // for the steam knob left open (boiler never pressurises); the refill_stop
 // telemetry reports the stop reason, so it can be widened if it trips on a
-// closed knob.
+// closed knob. 60 s did trip on one: after a 9 min steam session with two
+// pulls (2026-09-30) the boiler was still filling at 0.9 bar, 20 °C cooler
+// from the water already pumped in. 49 s had been enough after a 6 min
+// session. An open knob shows as water at the wand well before 120 s.
 constexpr float          kRefillPowerPct        = 30.0F;
 constexpr float          kRefillFullPressureBar = 5.0F;
 constexpr std::uint32_t  kRefillConfirmMs       = 600;
-constexpr std::uint32_t  kRefillMaxDurationMs   = 60'000;
+constexpr std::uint32_t  kRefillMaxDurationMs   = 120'000;
 
 // Pressure PID: output is pump PSM power %; setpoint is target group pressure.
 // The original gains were validated with a blind portafilter, which passes no
