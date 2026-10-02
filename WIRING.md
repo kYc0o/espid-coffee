@@ -81,13 +81,33 @@ rotary encoder, status/brew LED, flow meter, power switch, E-trigger.
 | Heater SSR (`GPIO47`) | 10 kΩ to **GND** | Guarantee heater OFF while the S3 boots (pin is Hi-Z). |
 | Steam switch (`GPIO4`) | internal pull-**down** | Switch sources 3V3 when closed → hold low when open. |
 | Pump zero-cross (`GPIO18`) | 10 kΩ pull-**up** to 3V3 + **2.2 kΩ series + 100 nF to GND** RC | Opto is open-collector; RC (τ ≈ 220 µs) + S3 pin glitch filter tame opto noise. |
-| Brew switch (`GPIO5`) | internal pull-**up** | Config uses active-low to GND. |
+| Brew switch (`GPIO5`) | internal pull-**down** | Switch sources 3V3 when closed → active-high (`kButtonActiveLow = false`). |
 | Valve / Pump gate outputs | none | Push-pull outputs. |
 | TSIC temp, HX711 DOUT/SCK | none | Push-pull sensor/ADC outputs. |
 
 Rule of thumb: **inputs to 3V3 → pull-down; inputs to GND → pull-up.**
 The S3 has usable internal pull-up/down on all the GPIOs above; only
 I²C (speed) and the heater SSR (boot safety) need external resistors.
+
+### Pin states in deep sleep (standby)
+
+The board stays powered while the machine sleeps, so every pin is put in
+the state that draws least and keeps the mains hardware off
+(`main/deep_sleep.cpp`):
+
+| Pin | In deep sleep | Why |
+|---|---|---|
+| `GPIO47` heater SSR | latched **low** (digital-pad hold) | SSR off; the external 10 kΩ pull-down agrees, so no current. No internal pull-up (it would fight the pull-down). |
+| `GPIO16` valve, `GPIO17` pump gate | latched at their inactive level (low) | Nothing can float a relay or triac on; 0 current into a driven-low input. |
+| `GPIO2` TSIC supply | latched **low** | Sensor unpowered. |
+| `GPIO5` brew, `GPIO4` steam | RTC input, RTC pull-**down** (RTC peripheral domain on) | Wake sources. 0 µA open; ~70 µA through the pull-down while a switch is left on. |
+| `GPIO8`/`GPIO9` I²C | released | The 4.7 kΩ pull-ups hold the idle-high bus: no current. Panel sent display-off + charge-pump-off before sleep; the ABP2 sleeps between conversions on its own. |
+| `GPIO18` zero-cross | released | The external 10 kΩ pull-up still conducts while the opto pulses (tens of µA); only rewiring would avoid it. |
+| `GPIO21` HX711 SCK | released | HX711 boards not fitted. If fitted, hold SCK **high** in sleep (and while the scale is disabled) — that is their power-down. |
+
+What remains is board-level and not firmware-controllable: the DevKit's
+power LED, the RGB LED's idle current, the 3V3 regulator and the mains
+5 V supply's own no-load loss.
 
 ---
 
