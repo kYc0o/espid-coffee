@@ -380,6 +380,8 @@ PowerSettings g_power;
 std::atomic<std::uint32_t> g_activity_seq{0};  // bumped by operator actions with no other trace
 std::atomic<bool>          g_ota_busy{false};
 std::atomic<bool>          g_sleep_pending{false};
+std::atomic<bool>          g_sleep_now{false};     // web UI "Sleep now", until served
+std::atomic<bool>          g_sleep_manual{false};  // this sleep was requested, not idle
 std::atomic<std::int64_t>  g_sleep_wake_at{-1};
 std::atomic<std::uint32_t> g_sleep_in_s{0};    // countdown, 0 when standby is off
 std::atomic<bool>          g_display_parked{false};
@@ -1535,6 +1537,21 @@ esp_err_t power_post_handler(httpd_req_t* req) {
         HTTPD_RESP_USE_STRLEN);
 }
 
+// POST /power/sleep — the web UI "Sleep now" button: power_task parks the
+// machine and enters deep sleep at its next tick (after any shot, refill or
+// OTA download in progress), with the usual switch and daily-timer wakes.
+esp_err_t power_sleep_post_handler(httpd_req_t* req) {
+    g_sleep_now.store(true, std::memory_order_release);
+    ESP_LOGI(kTag, "power: sleep requested from the web UI");
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(
+        req,
+        "<html><body><h3>Going to sleep.</h3>"
+        "<p>Wakes at the daily wake time, or flip the steam or brew switch.</p>"
+        "</body></html>",
+        HTTPD_RESP_USE_STRLEN);
+}
+
 bool start_http_server() noexcept {
     if (g_http_server != nullptr) {
         return true;
@@ -1620,8 +1637,13 @@ bool start_http_server() noexcept {
     power_uri.method  = HTTP_POST;
     power_uri.handler = &power_post_handler;
 
+    httpd_uri_t power_sleep_uri{};
+    power_sleep_uri.uri     = "/power/sleep";
+    power_sleep_uri.method  = HTTP_POST;
+    power_sleep_uri.handler = &power_sleep_post_handler;
+
     const httpd_uri_t* static_uris[] = {&css_uri, &js_uri, &api_uri, &api_power_uri,
-                                        &power_uri};
+                                        &power_uri, &power_sleep_uri};
     for (const httpd_uri_t* u : static_uris) {
         err = httpd_register_uri_handler(g_http_server, u);
         if (err != ESP_OK) {
@@ -2260,10 +2282,12 @@ void mqtt_task(void* /*arg*/) {
                     const int n = std::snprintf(
                         payload, sizeof(payload),
                         "{\"type\":\"sleep\",\"rec\":%u,\"uptime_ms\":%" PRIu64
-                        ",\"wake_epoch\":%lld,\"wake_in_s\":%lld,\"timeout_min\":%" PRIu32 "}",
+                        ",\"wake_epoch\":%lld,\"wake_in_s\":%lld,\"timeout_min\":%" PRIu32
+                        ",\"manual\":%u}",
                         static_cast<unsigned>(cfg::mqtt::RecordType::kSleep),
                         now_ms, wake_at, wake_in_s,
-                        g_power.standby_timeout_min.load(std::memory_order_relaxed));
+                        g_power.standby_timeout_min.load(std::memory_order_relaxed),
+                        g_sleep_manual.load(std::memory_order_relaxed) ? 1U : 0U);
                     if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
                         publish_payload(payload);
                     }
@@ -3212,9 +3236,14 @@ void power_task(void* /*arg*/) {
             ESP_LOGI(kTag, "standby in %u min", static_cast<unsigned>(remaining_ms / 60'000U));
             next_log_ms = now_ms + cfg::power::kLogPeriodMs;
         }
-        if (!timer.expired(now_ms)) {
+        // "Sleep now" skips the countdown, but still waits for a shot, a
+        // refill, the startup fill or an OTA download to finish.
+        const bool sleep_now = !busy && g_sleep_now.load(std::memory_order_acquire);
+        if (!sleep_now && !timer.expired(now_ms)) {
             continue;
         }
+        g_sleep_now.store(false, std::memory_order_relaxed);
+        g_sleep_manual.store(sleep_now, std::memory_order_relaxed);
 
         std::time_t wake_at = -1;
         if (g_power.wake_enabled.load(std::memory_order_relaxed) &&
@@ -3222,9 +3251,14 @@ void power_task(void* /*arg*/) {
             wake_at = espid::power::next_daily_wake(
                 std::time(nullptr), g_power.wake_minute.load(std::memory_order_relaxed));
         }
-        ESP_LOGI(kTag, "standby: idle for %u min, going to sleep (timer wake %s)",
-                 static_cast<unsigned>(timer.config().timeout_ms / 60'000U),
-                 wake_at >= 0 ? "armed" : "off");
+        if (sleep_now) {
+            ESP_LOGI(kTag, "standby: sleep requested, going to sleep (timer wake %s)",
+                     wake_at >= 0 ? "armed" : "off");
+        } else {
+            ESP_LOGI(kTag, "standby: idle for %u min, going to sleep (timer wake %s)",
+                     static_cast<unsigned>(timer.config().timeout_ms / 60'000U),
+                     wake_at >= 0 ? "armed" : "off");
+        }
 
         g_sleep_wake_at.store(static_cast<std::int64_t>(wake_at), std::memory_order_relaxed);
         g_sleep_record_sent.store(false, std::memory_order_relaxed);
