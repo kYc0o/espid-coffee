@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "timekeeping.cpp"
     INCLUDE_DIRS
         "."
     EMBED_TXTFILES
@@ -13,6 +14,7 @@ idf_component_register(
         freertos
         nvs_flash
         esp_http_server
+        esp_netif
         esp_driver_gpio
         hal_cpp
         tsic306
@@ -27,6 +29,7 @@ idf_component_register(
         scale
         hawkbit
         ui
+        power
 )
 
 # Modern C++ for application code.

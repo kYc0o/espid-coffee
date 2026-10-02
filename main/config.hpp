@@ -436,6 +436,18 @@ constexpr bool          kOtaEnabled     = false;
 }  // namespace net
 
 // ---------------------------------------------------------------------------
+// Wall-clock time (SNTP) for the daily wake schedule
+// ---------------------------------------------------------------------------
+// The ESP keeps time across deep sleep on its RTC, but a power cut resets it
+// to 1970: until SNTP syncs, nothing time-of-day based runs.
+namespace timekeeping {
+// POSIX TZ for Europe/Paris: CET, CEST from the last Sunday of March 02:00
+// to the last Sunday of October 03:00.
+constexpr const char*   kTimezone       = "CET-1CEST,M3.5.0,M10.5.0/3";
+constexpr const char*   kNtpServer      = "pool.ntp.org";
+}  // namespace timekeeping
+
+// ---------------------------------------------------------------------------
 // MQTT (stub)
 // ---------------------------------------------------------------------------
 namespace mqtt {

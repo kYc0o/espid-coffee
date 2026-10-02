@@ -18,6 +18,7 @@
 #include "brew/brew_button.hpp"
 #include "brew/shot_timer.hpp"
 #include "config.hpp"
+#include "timekeeping.hpp"
 #include "driver/gpio.h"
 #include "esp_http_server.h"
 #include "esp_littlefs.h"
@@ -3019,6 +3020,7 @@ void scale_task(void* arg) {
 }  // namespace
 
 extern "C" void app_main(void) {
+    espid::app::init_timezone();
     ESP_LOGI(kTag, "boot OK - %s v%u.%u.%u (%s)",
              cfg::kFirmwareName,
              static_cast<unsigned>(cfg::kFwVersionMajor),
@@ -3275,6 +3277,9 @@ extern "C" void app_main(void) {
                              espid::hal_cpp::to_string(wifi_state),
                              wifi_ip.data());
                     esp_wifi_set_ps(WIFI_PS_NONE);
+                    if (wifi_state == espid::hal_cpp::WifiState::kConnected) {
+                        (void)espid::app::start_sntp();
+                    }
                     break;
                 }
                 vTaskDelay(pdMS_TO_TICKS(200));
