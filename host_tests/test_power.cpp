@@ -9,6 +9,7 @@
 #include "power/daily_wake.hpp"
 #include "power/inactivity_timer.hpp"
 #include "power/sleep_planner.hpp"
+#include "power/time_of_day.hpp"
 #include "power/wake_pins.hpp"
 
 namespace {
@@ -203,6 +204,44 @@ TEST(WakePins, BothOnCannotBeArmed) {
 
 TEST(WakePins, MissingPinCannotBeArmed) {
     EXPECT_FALSE(select_wake_pins(WakePins{-1, 4}, false, false).ok);
+}
+
+// ---------------- time of day ----------------
+
+using espid::power::format_time_of_day;
+using espid::power::parse_time_of_day;
+
+TEST(TimeOfDay, ParsesTwentyFourHourText) {
+    int m = -1;
+    EXPECT_TRUE(parse_time_of_day("09:00", &m));
+    EXPECT_EQ(m, 540);
+    EXPECT_TRUE(parse_time_of_day("9:05", &m));
+    EXPECT_EQ(m, 545);
+    EXPECT_TRUE(parse_time_of_day("00:00", &m));
+    EXPECT_EQ(m, 0);
+    EXPECT_TRUE(parse_time_of_day("23:59", &m));
+    EXPECT_EQ(m, 1439);
+}
+
+TEST(TimeOfDay, RejectsAnythingElse) {
+    int m = 7;
+    for (const char* bad : {"", "9", "24:00", "12:60", "123:00", "12:5", "12:345",
+                            "12:00:00", "12:00 ", "7pm", ":30", "ab:cd"}) {
+        EXPECT_FALSE(parse_time_of_day(bad, &m)) << bad;
+    }
+    EXPECT_FALSE(parse_time_of_day(nullptr, &m));
+    EXPECT_EQ(m, 7);
+}
+
+TEST(TimeOfDay, FormatsAndRoundTrips) {
+    char buf[6];
+    ASSERT_TRUE(format_time_of_day(545, buf, sizeof(buf)));
+    EXPECT_STREQ(buf, "09:05");
+    int m = 0;
+    ASSERT_TRUE(parse_time_of_day(buf, &m));
+    EXPECT_EQ(m, 545);
+    EXPECT_FALSE(format_time_of_day(1440, buf, sizeof(buf)));
+    EXPECT_FALSE(format_time_of_day(0, buf, 5));
 }
 
 }  // namespace
