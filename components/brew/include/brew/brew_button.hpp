@@ -44,6 +44,15 @@ class BrewButton {
         candidate_since_ms_ = 0;
     }
 
+    // Take the current raw level as the stable state without emitting an
+    // event. Call once before the first poll(): a latching switch that is
+    // already on at boot is the baseline, so only a later off->on counts as
+    // a press.
+    void seed(bool raw_level) noexcept {
+        stable_pressed_ = cfg_.active_low ? !raw_level : raw_level;
+        has_candidate_  = false;
+    }
+
     // Feed one raw sample. Returns kPressed/kReleased on the rising
     // edge of a debounced transition, otherwise kNone.
     Event poll(bool raw_level, std::uint64_t now_ms) noexcept {

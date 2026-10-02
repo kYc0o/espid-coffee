@@ -88,6 +88,32 @@ TEST(BrewButton, ResetReturnsToReleasedNoCandidate) {
     EXPECT_EQ(btn.poll(true, 100), BrewButton::Event::kNone);
 }
 
+// A latching switch already on at boot (left on, or flipped to wake the
+// machine from sleep) is the baseline, not a press: no shot from a cold boiler.
+TEST(BrewButton, SeededOnIsNotAPress) {
+    BrewButton::Config c{/*active_low=*/false, /*debounce_ms=*/10};
+    BrewButton         btn(c);
+    btn.seed(true);
+    EXPECT_TRUE(btn.is_pressed());
+    EXPECT_EQ(btn.poll(true, 0),   BrewButton::Event::kNone);
+    EXPECT_EQ(btn.poll(true, 100), BrewButton::Event::kNone);
+
+    // Off, then on again: that second press is a real one.
+    (void)btn.poll(false, 200);
+    EXPECT_EQ(btn.poll(false, 210), BrewButton::Event::kReleased);
+    (void)btn.poll(true, 300);
+    EXPECT_EQ(btn.poll(true, 310), BrewButton::Event::kPressed);
+}
+
+TEST(BrewButton, SeedAppliesPolarityAndDropsCandidate) {
+    BrewButton::Config c{/*active_low=*/true, /*debounce_ms=*/10};
+    BrewButton         btn(c);
+    (void)btn.poll(false, 0);  // pending press candidate
+    btn.seed(true);            // active-low: high = released
+    EXPECT_FALSE(btn.is_pressed());
+    EXPECT_EQ(btn.poll(true, 50), BrewButton::Event::kNone);
+}
+
 // ---------------- ShotTimer ----------------
 
 TEST(ShotTimer, StartsIdleAtZero) {

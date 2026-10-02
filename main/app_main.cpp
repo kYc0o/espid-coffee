@@ -2892,6 +2892,8 @@ void button_task(void* arg) {
     bcfg.debounce_ms = cfg::brew::kDebounceMs;
     espid::brew::BrewButton btn(bcfg);
     espid::brew::ShotTimer  timer;
+    // A switch already on at boot is not a press (no shot from a cold boiler).
+    btn.seed(gpio_get_level(cfg::brew::kButtonGpio) != 0);
     // True while the current press is a refill rather than a shot.
     bool refill_press = false;
 
