@@ -13,11 +13,13 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 
 #include "abp2/abp2_driver.hpp"
 #include "brew/brew_button.hpp"
 #include "brew/shot_timer.hpp"
 #include "config.hpp"
+#include "deep_sleep.hpp"
 #include "timekeeping.hpp"
 #include "driver/gpio.h"
 #include "esp_http_server.h"
@@ -40,6 +42,8 @@
 #include "pid/heater_phase.hpp"
 #include "pid/over_temp_guard.hpp"
 #include "pid/telemetry_policy.hpp"
+#include "power/daily_wake.hpp"
+#include "power/inactivity_timer.hpp"
 #include "pump/refill_sequencer.hpp"
 #include "ui/machine_status.hpp"
 #include "pid/shot_thermal_stats.hpp"
@@ -354,6 +358,26 @@ std::atomic<std::uint32_t> g_sensor_consecutive_errors{0};
 std::atomic<std::uint32_t> g_pressure_consecutive_errors{0};
 std::atomic<bool> g_mqtt_connected{false};
 std::atomic<bool> g_emergency_stop{false};
+
+// Standby (deep sleep). power_task owns the inactivity countdown and the
+// sleep sequence; raising g_sleep_pending parks the other tasks first:
+// control_task forces the heater off, display_task shows the goodbye
+// screen and puts the panel to sleep (g_display_parked), mqtt_task sends
+// the sleep record (g_sleep_record_sent).
+struct PowerSettings {
+    std::atomic<bool>          standby_enabled{cfg::power::kStandbyEnabledDefault};
+    std::atomic<std::uint32_t> standby_timeout_min{cfg::power::kStandbyTimeoutMinDefault};
+    std::atomic<bool>          wake_enabled{cfg::power::kWakeEnabledDefault};
+    std::atomic<int>           wake_minute{cfg::power::kWakeMinuteDefault};
+};
+PowerSettings g_power;
+std::atomic<std::uint32_t> g_activity_seq{0};  // bumped by operator actions with no other trace
+std::atomic<bool>          g_ota_busy{false};
+std::atomic<bool>          g_sleep_pending{false};
+std::atomic<std::int64_t>  g_sleep_wake_at{-1};
+std::atomic<std::uint32_t> g_sleep_in_s{0};    // countdown, 0 when standby is off
+std::atomic<bool>          g_display_parked{false};
+std::atomic<bool>          g_sleep_record_sent{false};
 std::atomic<bool> g_steam_active{false};
 std::atomic<bool> g_fill_complete{false};
 std::atomic<bool> g_fill_ok{false};
@@ -2013,7 +2037,7 @@ void mqtt_task(void* /*arg*/) {
                         ",\"pressure_bar\":%.3f,\"pump_pct\":%.1f"
                         ",\"steam\":%u,\"brewing\":%u,\"estop\":%u"
                         ",\"free_heap\":%" PRIu32 ",\"min_free_heap\":%" PRIu32
-                        ",\"wifi_rssi\":%d}",
+                        ",\"wifi_rssi\":%d,\"wake_id\":%u,\"sleep_in_s\":%" PRIu32 "}",
                         static_cast<unsigned>(cfg::mqtt::RecordType::kStatus),
                         now_ms, hb,
                         espid::ui::to_string(machine_status),
@@ -2032,12 +2056,38 @@ void mqtt_task(void* /*arg*/) {
                         g_emergency_stop.load(std::memory_order_relaxed) ? 1U : 0U,
                         static_cast<std::uint32_t>(esp_get_free_heap_size()),
                         static_cast<std::uint32_t>(esp_get_minimum_free_heap_size()),
-                        rssi);
+                        rssi,
+                        static_cast<unsigned>(espid::app::wake_reason()),
+                        g_sleep_in_s.load(std::memory_order_relaxed));
                     if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
                         publish_payload(payload);
                     }
                 }
+
+                // Last record before deep sleep: when the timer will wake the
+                // machine (-1: only a switch will).
+                if (g_sleep_pending.load(std::memory_order_acquire) &&
+                    !g_sleep_record_sent.load(std::memory_order_relaxed)) {
+                    const auto wake_at = static_cast<long long>(
+                        g_sleep_wake_at.load(std::memory_order_relaxed));
+                    const auto now_s = static_cast<long long>(std::time(nullptr));
+                    const long long wake_in_s = (wake_at > now_s) ? wake_at - now_s : -1;
+                    const int n = std::snprintf(
+                        payload, sizeof(payload),
+                        "{\"type\":\"sleep\",\"rec\":%u,\"uptime_ms\":%" PRIu64
+                        ",\"wake_epoch\":%lld,\"wake_in_s\":%lld,\"timeout_min\":%" PRIu32 "}",
+                        static_cast<unsigned>(cfg::mqtt::RecordType::kSleep),
+                        now_ms, wake_at, wake_in_s,
+                        g_power.standby_timeout_min.load(std::memory_order_relaxed));
+                    if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
+                        publish_payload(payload);
+                    }
+                    g_sleep_record_sent.store(true, std::memory_order_release);
+                }
             } else {
+                if (g_sleep_pending.load(std::memory_order_acquire)) {
+                    g_sleep_record_sent.store(true, std::memory_order_release);  // nobody to tell
+                }
                 next_temp_publish_ms = now_ms;
                 next_pressure_publish_ms = now_ms;
                 // Nothing is being published: keep the averaging window short so
@@ -2206,7 +2256,8 @@ void control_task(void* arg) {
                                 (now_ms - phase_tracker.entered_ms()) < brew_pulse_ms;
 
         float duty_pct = 0.0F;
-        if (sample_fresh && std::isfinite(temp_c) && !emergency_stop) {
+        const bool sleep_pending = g_sleep_pending.load(std::memory_order_acquire);
+        if (sample_fresh && std::isfinite(temp_c) && !emergency_stop && !sleep_pending) {
             duty_pct = controller.update(active_setpoint_c, temp_c);
             // Feed-forward: the PID still runs (state stays current), only the
             // applied duty is raised while the pulse window is open.
@@ -2358,7 +2409,54 @@ void display_task(void* arg) {
     espid::ui::MachineStatusTracker status_tracker(cfg::oled::kSteamReadyOnBelowC,
                                                    cfg::oled::kSteamReadyOffBelowC);
 
+    // Runs `fn` with the shared I2C bus held; the ABP2 polls the same bus.
+    const auto with_bus = [](const auto& fn) {
+        if (g_i2c_bus_mutex == nullptr) {
+            fn();
+            return true;
+        }
+        if (xSemaphoreTake(g_i2c_bus_mutex, ticks_from_ms(cfg::oled::kI2cLockTimeoutMs)) !=
+            pdTRUE) {
+            return false;
+        }
+        fn();
+        xSemaphoreGive(g_i2c_bus_mutex);
+        return true;
+    };
+
     for (;;) {
+        // Standby: say goodbye (and when the machine will wake), then turn
+        // the panel off so it does not stay lit through deep sleep.
+        if (g_sleep_pending.load(std::memory_order_acquire)) {
+            if (!g_display_parked.load(std::memory_order_relaxed)) {
+                char wake_line[24];
+                const std::time_t wake_at =
+                    static_cast<std::time_t>(g_sleep_wake_at.load(std::memory_order_relaxed));
+                std::tm local{};
+                if (wake_at >= 0 && localtime_r(&wake_at, &local) != nullptr) {
+                    std::strftime(wake_line, sizeof(wake_line), "wake %H:%M", &local);
+                } else {
+                    std::snprintf(wake_line, sizeof(wake_line), "wake: switch");
+                }
+                display->clear();
+                display->draw_text(8, 28, espid::hal_cpp::Font::kLarge, "Standby");
+                display->draw_text(8, 50, espid::hal_cpp::Font::kSmall, wake_line);
+                (void)with_bus([&] { (void)display->flush(); });
+                vTaskDelay(pdMS_TO_TICKS(cfg::power::kGoodbyeScreenMs));
+                if (with_bus([&] { (void)display->set_sleep(true); })) {
+                    g_display_parked.store(true, std::memory_order_release);
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(cfg::oled::kRefreshPeriodMs));
+            continue;
+        }
+        if (g_display_parked.load(std::memory_order_relaxed)) {
+            // Sleep was called off (wake sources could not be armed).
+            if (with_bus([&] { (void)display->set_sleep(false); })) {
+                g_display_parked.store(false, std::memory_order_release);
+            }
+        }
+
         const std::uint64_t now_ms =
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
         const bool  valid = g_snapshot.valid.load(std::memory_order_acquire);
@@ -2868,7 +2966,11 @@ void hawkbit_task(void* /*arg*/) {
             hb_cfg.device_id      = cfg::mqtt::kClientId;
             hb_cfg.security_token = token;
 
-            if (espid::hawkbit::poll_and_apply(hb_cfg)) {
+            // Holds off standby: a download can take minutes.
+            g_ota_busy.store(true, std::memory_order_release);
+            const bool installed = espid::hawkbit::poll_and_apply(hb_cfg);
+            g_ota_busy.store(false, std::memory_order_release);
+            if (installed) {
                 ESP_LOGI(kTag, "hawkbit: new firmware installed — rebooting");
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 esp_restart();
@@ -2876,6 +2978,85 @@ void hawkbit_task(void* /*arg*/) {
         }
 
         vTaskDelay(pdMS_TO_TICKS(cfg::hawkbit::kPollIntervalMs));
+    }
+}
+
+std::uint64_t uptime_ms() noexcept {
+    return static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+}
+
+// Standby countdown and sleep sequence. Steam switch changes and settings
+// changes restart the countdown; a shot, a refill, the startup fill or an
+// OTA download hold it. On expiry the other tasks are parked (heater off,
+// last MQTT record out, panel off) before the chip enters deep sleep.
+void power_task(void* /*arg*/) {
+    const auto timer_config = [] {
+        espid::power::InactivityTimer::Config c{};
+        c.enabled    = g_power.standby_enabled.load(std::memory_order_relaxed);
+        c.timeout_ms = g_power.standby_timeout_min.load(std::memory_order_relaxed) * 60'000U;
+        return c;
+    };
+    espid::power::InactivityTimer timer(timer_config(), uptime_ms());
+    bool          steam_was     = g_steam_active.load(std::memory_order_relaxed);
+    std::uint32_t activity_seen = g_activity_seq.load(std::memory_order_acquire);
+    std::uint64_t next_log_ms   = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(cfg::power::kTaskPeriodMs));
+        const std::uint64_t now_ms = uptime_ms();
+        timer.set_config(timer_config());
+
+        const bool steam = g_steam_active.load(std::memory_order_relaxed);
+        const std::uint32_t activity = g_activity_seq.load(std::memory_order_acquire);
+        const bool busy =
+            g_shot.running.load(std::memory_order_relaxed) ||
+            g_refill_switch.load(std::memory_order_acquire) ||
+            g_refill.state.load(std::memory_order_acquire) !=
+                static_cast<std::uint8_t>(espid::pump::RefillSequencer::State::kIdle) ||
+            g_ota_busy.load(std::memory_order_acquire) ||
+            !g_fill_complete.load(std::memory_order_acquire);
+        if (busy || steam != steam_was || activity != activity_seen) {
+            timer.touch(now_ms);
+        }
+        steam_was     = steam;
+        activity_seen = activity;
+
+        const std::uint32_t remaining_ms = timer.remaining_ms(now_ms);
+        g_sleep_in_s.store(remaining_ms / 1000U, std::memory_order_relaxed);
+        if (timer.config().enabled && now_ms >= next_log_ms) {
+            ESP_LOGI(kTag, "standby in %u min", static_cast<unsigned>(remaining_ms / 60'000U));
+            next_log_ms = now_ms + cfg::power::kLogPeriodMs;
+        }
+        if (!timer.expired(now_ms)) {
+            continue;
+        }
+
+        std::time_t wake_at = -1;
+        if (g_power.wake_enabled.load(std::memory_order_relaxed) &&
+            espid::app::clock_is_set()) {
+            wake_at = espid::power::next_daily_wake(
+                std::time(nullptr), g_power.wake_minute.load(std::memory_order_relaxed));
+        }
+        ESP_LOGI(kTag, "standby: idle for %u min, going to sleep (timer wake %s)",
+                 static_cast<unsigned>(timer.config().timeout_ms / 60'000U),
+                 wake_at >= 0 ? "armed" : "off");
+
+        g_sleep_wake_at.store(static_cast<std::int64_t>(wake_at), std::memory_order_relaxed);
+        g_sleep_record_sent.store(false, std::memory_order_relaxed);
+        g_sleep_pending.store(true, std::memory_order_release);
+
+        const std::uint64_t park_deadline_ms = uptime_ms() + cfg::power::kParkTimeoutMs;
+        while (uptime_ms() < park_deadline_ms &&
+               !(g_sleep_record_sent.load(std::memory_order_acquire) &&
+                 g_display_parked.load(std::memory_order_acquire))) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        vTaskDelay(pdMS_TO_TICKS(cfg::power::kHeaterSettleMs));
+
+        if (!espid::app::enter_deep_sleep(wake_at)) {
+            g_sleep_pending.store(false, std::memory_order_release);
+            timer.touch(uptime_ms());
+        }
     }
 }
 
@@ -3020,6 +3201,9 @@ void scale_task(void* arg) {
 }  // namespace
 
 extern "C" void app_main(void) {
+    // Before anything touches a GPIO: drop the latches the last deep sleep
+    // left on the outputs.
+    (void)espid::app::begin_boot();
     espid::app::init_timezone();
     ESP_LOGI(kTag, "boot OK - %s v%u.%u.%u (%s)",
              cfg::kFirmwareName,
@@ -3430,6 +3614,12 @@ extern "C" void app_main(void) {
                 ESP_LOGW(kTag, "mqtt_task create failed - telemetry disabled");
             }
         }
+    }
+
+    ok = xTaskCreatePinnedToCore(&power_task, "power", cfg::power::kTaskStackBytes, nullptr,
+                                 cfg::power::kTaskPriority, nullptr, cfg::power::kTaskCore);
+    if (ok != pdPASS) {
+        ESP_LOGW(kTag, "power_task create failed - standby disabled");
     }
 
     if (cfg::hawkbit::kEnabled) {

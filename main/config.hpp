@@ -448,6 +448,35 @@ constexpr const char*   kNtpServer      = "pool.ntp.org";
 }  // namespace timekeeping
 
 // ---------------------------------------------------------------------------
+// Standby: deep sleep after inactivity, daily scheduled wake
+// ---------------------------------------------------------------------------
+// The machine stays mains-powered; standby is ESP32-S3 deep sleep with every
+// output latched off and both switches armed as wake sources. Holding
+// 94.5 C costs ~45 W, so the inactivity timeout is what saves energy; the
+// MCU sleep itself trims the remaining fraction of a watt.
+namespace power {
+constexpr bool          kStandbyEnabledDefault  = true;
+constexpr std::uint32_t kStandbyTimeoutMinDefault = 90;
+constexpr std::uint32_t kStandbyTimeoutMinMin   = 5;
+constexpr std::uint32_t kStandbyTimeoutMinMax   = 720;
+constexpr bool          kWakeEnabledDefault     = true;
+constexpr int           kWakeMinuteDefault      = 9 * 60;   // 09:00 local
+constexpr std::uint32_t kTaskPeriodMs           = 1000;
+constexpr std::uint32_t kTaskStackBytes         = 4096;
+constexpr std::uint32_t kTaskPriority           = 2;
+constexpr std::int32_t  kTaskCore               = 0;
+// Before sleeping, tasks get this long to park: heater off, last MQTT
+// record out, OLED showing the goodbye screen and then asleep.
+constexpr std::uint32_t kParkTimeoutMs          = 3000;
+constexpr std::uint32_t kGoodbyeScreenMs        = 1500;
+// The heater is slow PWM with a 1 s period: one full period at 0 % before
+// the SSR pin is latched.
+constexpr std::uint32_t kHeaterSettleMs         = 1100;
+// Remaining-time console log while the countdown runs.
+constexpr std::uint32_t kLogPeriodMs            = 60'000;
+}  // namespace power
+
+// ---------------------------------------------------------------------------
 // MQTT (stub)
 // ---------------------------------------------------------------------------
 namespace mqtt {
@@ -487,6 +516,7 @@ enum class RecordType : std::uint8_t {
     kRefillStart = 8,
     kRefillStop  = 9,
     kStatus      = 10,
+    kSleep       = 11,  // last record before deep sleep
 };
 // Telemetry cadence (see pid::TelemetryPolicy). Transients are what PID
 // tuning needs, so the rate follows the heater phase rather than a fixed

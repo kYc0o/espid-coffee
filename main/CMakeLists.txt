@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.cpp"
         "timekeeping.cpp"
+        "deep_sleep.cpp"
     INCLUDE_DIRS
         "."
     EMBED_TXTFILES
@@ -15,6 +16,8 @@ idf_component_register(
         nvs_flash
         esp_http_server
         esp_netif
+        esp_wifi
+        esp_hw_support
         esp_driver_gpio
         hal_cpp
         tsic306
