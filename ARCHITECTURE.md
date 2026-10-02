@@ -56,6 +56,8 @@ ESPID-Coffee/
 ├── main/
 │   ├── CMakeLists.txt
 │   ├── app_main.cpp              # entry: spawns sensor / display / button tasks
+│   ├── deep_sleep.{hpp,cpp}      # standby: output latches, wake sources, wake reason
+│   ├── timekeeping.{hpp,cpp}     # TZ + SNTP wall clock
 │   └── config.hpp                # compile-time defaults (namespace espid::config)
 ├── main/data/                    # LittleFS web-UI assets (index.html, style.css, app.js)
 ├── components/
@@ -80,7 +82,8 @@ ESPID-Coffee/
 │   ├── scale/                    # dual-HX711 driver + ScaleCore (pure logic)
 │   ├── hawkbit/                  # HawkBit DDI OTA client
 │   ├── brew/                     # debounced brew button + shot timer (header-only)
-│   └── ui/                       # OLED status/prompt selection (header-only)
+│   ├── ui/                       # OLED status/prompt selection (header-only)
+│   └── power/                    # standby timer, daily wake, sleep planning (header-only)
 ├── host_tests/                   # GoogleTest harness, ESP-IDF Linux target
 │   ├── CMakeLists.txt
 │   ├── test_tsic306.cpp
@@ -187,6 +190,7 @@ Rules:
 | `scale`       |  1   |    3     | 4096 B | 100 ms   | Dual HX711 read → weight (disabled by default) |
 | `mqtt`        |  1   |    2     | 6144 B | event    | Telemetry publish (TLS, optional HA discovery) |
 | `hawkbit`     |  0   |    1     | 8192 B | 5 min    | HawkBit DDI OTA poll               |
+| `power`       |  0   |    2     | 4096 B | 1 s      | Standby countdown → park tasks → deep sleep |
 | `heartbeat`   | idle | (main)   |  —     | 5000 ms  | `app_main`, proof-of-life log      |
 | `wifi-evt`    |  0   | esp-wifi | (IDF)  | event    | esp_event task (esp_wifi)          |
 | `httpd`       |  0   |    5     | 8192 B | event    | esp_http_server worker (web UI + provisioning) |
@@ -256,7 +260,9 @@ the loop offline; `shot_summary` closes each shot, and `brew_start` /
 mark the mode edges. A `status` record goes out on every heartbeat
 (`kHeartbeatPeriodMs`, 5 s) for dashboards: the machine state the OLED
 shows (`machine_state` / `machine_state_id`), firmware version, the key
-live values, free heap and Wi-Fi RSSI.
+live values, free heap, Wi-Fi RSSI, why this boot happened (`wake_id`)
+and the standby countdown (`sleep_in_s`). A `sleep` record is the last
+word before deep sleep, with the timer wake epoch (`-1`: switch only).
 
 Post-steam handling. `pid::OverTempGuard` (in control_task) keeps the steam
 over-temperature limits in force after the steam switch goes off, until the
@@ -269,6 +275,25 @@ timeout, or the switch is released). Results land in `g_refill` behind
 start/stop sequence counters for mqtt_task; `refill_stop` reports pump
 half-cycles fired and the temperature drop, the two handles for estimating
 how much water went back in.
+
+Standby. The machine stays mains-powered; standby is ESP32-S3 deep sleep.
+power_task counts down `power::InactivityTimer` (default 90 min): a steam
+switch change or a settings save restarts it; a shot, a refill, the
+startup fill or an OTA download hold it. On expiry it raises
+`g_sleep_pending`, which parks the other tasks -- control_task forces the
+heater to 0 %, mqtt_task sends the `sleep` record, display_task shows a
+goodbye screen and puts the panel to sleep (charge pump off) -- then calls
+`enter_deep_sleep()`. Every output is latched at its inactive level
+through the sleep (heater SSR, valve, pump gate, TSIC supply); the two
+latching switches are armed as wake sources (`power::select_wake_pins`:
+off switches on ext1 "any high", one left on via ext0 when it turns off);
+an RTC timer wakes the machine at the daily wake time when SNTP has set
+the clock since power-on. Every wake is a full reboot through the normal
+power-on path; `begin_boot()` drops the latches first and classifies the
+wake. Without a 32 kHz crystal the sleep clock drifts a few percent, so a
+long sleep is split by `power::plan_sleep()`: early timer wakes only join
+Wi-Fi, resync SNTP and sleep again (`run_clock_resync()`), and the last
+leg of <= 2 min is slept straight to the target.
 
 Every record also carries numeric mirrors of its string fields (`rec`
 for the record type, `phase_id` for the heater phase). The collector
@@ -423,6 +448,7 @@ If `get_idf` alias is unavailable in your shell:
 | 8     | Pump PSM (triac + ZC ISR) + 3-way valve control | ✅ done | fill guard + pressure PID |
 | 9     | Dual-HX711 scale (driver + `ScaleCore`) | 🚧 driver done | disabled pending calibration |
 | 10    | Safety over-temp latch + HawkBit A/B OTA | 🚧 partial | emergency-stop + DDI poll live; watchdog TBD |
+| 11    | Standby: deep sleep after inactivity + daily SNTP-timed wake | ✅ done | `power` component, `/power` settings |
 
 Explicitly deferred: TLS for the local web UI, Bluetooth.
 
