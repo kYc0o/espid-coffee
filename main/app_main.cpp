@@ -43,6 +43,7 @@
 #include "pid/over_temp_guard.hpp"
 #include "pid/telemetry_policy.hpp"
 #include "power/daily_wake.hpp"
+#include "power/time_of_day.hpp"
 #include "power/inactivity_timer.hpp"
 #include "pump/refill_sequencer.hpp"
 #include "ui/machine_status.hpp"
@@ -235,6 +236,11 @@ constexpr const char* kCfgMqttPort = "mqtt_port";
 constexpr const char* kCfgMqttUsername = "mqtt_user";
 constexpr const char* kCfgMqttPassword = "mqtt_pass";
 constexpr const char* kCfgMqttClientId = "mqtt_client";
+// Standby / wake schedule (own form and endpoint: /power, /api/power).
+constexpr const char* kCfgStandbyEnabled = "sb_en";
+constexpr const char* kCfgStandbyMinutes = "sb_min";
+constexpr const char* kCfgWakeEnabled    = "wk_en";
+constexpr const char* kCfgWakeTime       = "wk_time";
 
 bool load_setting_from_nvs(const char* key, const char* fallback,
                            char* out, std::size_t out_len) noexcept;
@@ -811,6 +817,39 @@ void load_runtime_control_settings_from_nvs() noexcept {
     publish_runtime_control_settings(v);
 }
 
+bool parse_flag(const char* text, bool* out) noexcept {
+    if (text == nullptr || out == nullptr || text[1] != '\0' ||
+        (text[0] != '0' && text[0] != '1')) {
+        return false;
+    }
+    *out = text[0] == '1';
+    return true;
+}
+
+void load_power_settings_from_nvs() noexcept {
+    char value[16];
+    bool flag = false;
+    std::uint16_t minutes = 0;
+    int minute_of_day = 0;
+    if (load_setting_from_nvs(kCfgStandbyEnabled, nullptr, value, sizeof(value)) &&
+        parse_flag(value, &flag)) {
+        g_power.standby_enabled.store(flag, std::memory_order_relaxed);
+    }
+    if (load_setting_from_nvs(kCfgStandbyMinutes, nullptr, value, sizeof(value)) &&
+        parse_u16_in_range(value, cfg::power::kStandbyTimeoutMinMin,
+                           cfg::power::kStandbyTimeoutMinMax, &minutes)) {
+        g_power.standby_timeout_min.store(minutes, std::memory_order_relaxed);
+    }
+    if (load_setting_from_nvs(kCfgWakeEnabled, nullptr, value, sizeof(value)) &&
+        parse_flag(value, &flag)) {
+        g_power.wake_enabled.store(flag, std::memory_order_relaxed);
+    }
+    if (load_setting_from_nvs(kCfgWakeTime, nullptr, value, sizeof(value)) &&
+        espid::power::parse_time_of_day(value, &minute_of_day)) {
+        g_power.wake_minute.store(minute_of_day, std::memory_order_relaxed);
+    }
+}
+
 void restart_task(void* /*arg*/) {
     vTaskDelay(pdMS_TO_TICKS(1200));
     esp_restart();
@@ -1362,6 +1401,140 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// GET /api/power — standby and wake-schedule settings plus clock state.
+esp_err_t api_power_get_handler(httpd_req_t* req) {
+    char wake_time[8];
+    if (!espid::power::format_time_of_day(g_power.wake_minute.load(std::memory_order_relaxed),
+                                          wake_time, sizeof(wake_time))) {
+        std::snprintf(wake_time, sizeof(wake_time), "09:00");
+    }
+    char clock[24];
+    espid::app::local_time_text(clock, sizeof(clock));
+
+    char next_wake[24] = "none";
+    if (g_power.wake_enabled.load(std::memory_order_relaxed) && espid::app::clock_is_set()) {
+        const std::time_t at = espid::power::next_daily_wake(
+            std::time(nullptr), g_power.wake_minute.load(std::memory_order_relaxed));
+        std::tm local{};
+        if (at >= 0 && localtime_r(&at, &local) != nullptr) {
+            std::strftime(next_wake, sizeof(next_wake), "%Y-%m-%d %H:%M", &local);
+        }
+    }
+
+    char json[256];
+    const int n = std::snprintf(
+        json, sizeof(json),
+        "{\"sb_en\":\"%u\",\"sb_min\":\"%" PRIu32 "\",\"wk_en\":\"%u\","
+        "\"wk_time\":\"%s\",\"clock\":\"%s\",\"next_wake\":\"%s\","
+        "\"sleep_in_s\":%" PRIu32 "}",
+        g_power.standby_enabled.load(std::memory_order_relaxed) ? 1U : 0U,
+        g_power.standby_timeout_min.load(std::memory_order_relaxed),
+        g_power.wake_enabled.load(std::memory_order_relaxed) ? 1U : 0U,
+        wake_time, clock, next_wake,
+        g_sleep_in_s.load(std::memory_order_relaxed));
+    if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(json)) {
+        return httpd_resp_send_500(req);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+// POST /power — sb_en (0/1), sb_min (minutes), wk_en (0/1), wk_time (HH:MM).
+// Saving counts as activity, so the standby countdown restarts.
+esp_err_t power_post_handler(httpd_req_t* req) {
+    if (req->content_len <= 0 ||
+        req->content_len > static_cast<int>(cfg::net::kProvisionFormMaxLen)) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        return httpd_resp_send(req, "Invalid payload", HTTPD_RESP_USE_STRLEN);
+    }
+    char body[cfg::net::kProvisionFormMaxLen + 1]{};
+    int read_total = 0;
+    while (read_total < req->content_len) {
+        const int chunk =
+            httpd_req_recv(req, body + read_total, req->content_len - read_total);
+        if (chunk <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        read_total += chunk;
+    }
+    body[read_total] = '\0';
+
+    const auto reject = [req](const char* msg) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+    };
+    char sb_en_txt[4]{};
+    char sb_min_txt[8]{};
+    char wk_en_txt[4]{};
+    char wk_time_txt[8]{};
+    bool sb_en = false;
+    bool wk_en = false;
+    std::uint16_t sb_min = 0;
+    int wk_minute = 0;
+    if (!form_field(body, kCfgStandbyEnabled, sb_en_txt, sizeof(sb_en_txt)) ||
+        !parse_flag(sb_en_txt, &sb_en)) {
+        return reject("Invalid sb_en");
+    }
+    if (!form_field(body, kCfgStandbyMinutes, sb_min_txt, sizeof(sb_min_txt)) ||
+        !parse_u16_in_range(sb_min_txt, cfg::power::kStandbyTimeoutMinMin,
+                            cfg::power::kStandbyTimeoutMinMax, &sb_min)) {
+        return reject("Invalid sb_min");
+    }
+    if (!form_field(body, kCfgWakeEnabled, wk_en_txt, sizeof(wk_en_txt)) ||
+        !parse_flag(wk_en_txt, &wk_en)) {
+        return reject("Invalid wk_en");
+    }
+    if (!form_field(body, kCfgWakeTime, wk_time_txt, sizeof(wk_time_txt)) ||
+        !espid::power::parse_time_of_day(wk_time_txt, &wk_minute)) {
+        return reject("Invalid wk_time");
+    }
+    char wk_time_norm[8];
+    (void)espid::power::format_time_of_day(wk_minute, wk_time_norm, sizeof(wk_time_norm));
+
+    nvs_handle_t nvs{};
+    esp_err_t err = nvs_open(kCfgNvsNamespace, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    const struct {
+        const char* key;
+        const char* value;
+    } entries[] = {
+        {kCfgStandbyEnabled, sb_en ? "1" : "0"},
+        {kCfgStandbyMinutes, sb_min_txt},
+        {kCfgWakeEnabled, wk_en ? "1" : "0"},
+        {kCfgWakeTime, wk_time_norm},
+    };
+    for (const auto& e : entries) {
+        err = nvs_set_str(nvs, e.key, e.value);
+        if (err != ESP_OK) {
+            break;
+        }
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+
+    g_power.standby_enabled.store(sb_en, std::memory_order_relaxed);
+    g_power.standby_timeout_min.store(sb_min, std::memory_order_relaxed);
+    g_power.wake_enabled.store(wk_en, std::memory_order_relaxed);
+    g_power.wake_minute.store(wk_minute, std::memory_order_relaxed);
+    g_activity_seq.fetch_add(1, std::memory_order_release);
+    ESP_LOGI(kTag, "power settings: standby %s after %u min, wake %s at %s",
+             sb_en ? "on" : "off", static_cast<unsigned>(sb_min),
+             wk_en ? "on" : "off", wk_time_norm);
+
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(
+        req, "<html><body><h3>Power settings saved.</h3><a href='/'>Back</a></body></html>",
+        HTTPD_RESP_USE_STRLEN);
+}
+
 bool start_http_server() noexcept {
     if (g_http_server != nullptr) {
         return true;
@@ -1371,6 +1544,7 @@ bool start_http_server() noexcept {
     http_cfg.server_port    = static_cast<int>(cfg::net::kHttpPort);
     http_cfg.lru_purge_enable = true;
     http_cfg.stack_size     = 8192;  // default 4096 is too small for settings handler
+    http_cfg.max_uri_handlers = cfg::net::kHttpMaxUriHandlers;
 
     esp_err_t err = httpd_start(&g_http_server, &http_cfg);
     if (err != ESP_OK) {
@@ -1436,7 +1610,18 @@ bool start_http_server() noexcept {
     api_uri.method  = HTTP_GET;
     api_uri.handler = &api_settings_get_handler;
 
-    const httpd_uri_t* static_uris[] = {&css_uri, &js_uri, &api_uri};
+    httpd_uri_t api_power_uri{};
+    api_power_uri.uri     = "/api/power";
+    api_power_uri.method  = HTTP_GET;
+    api_power_uri.handler = &api_power_get_handler;
+
+    httpd_uri_t power_uri{};
+    power_uri.uri     = "/power";
+    power_uri.method  = HTTP_POST;
+    power_uri.handler = &power_post_handler;
+
+    const httpd_uri_t* static_uris[] = {&css_uri, &js_uri, &api_uri, &api_power_uri,
+                                        &power_uri};
     for (const httpd_uri_t* u : static_uris) {
         err = httpd_register_uri_handler(g_http_server, u);
         if (err != ESP_OK) {
@@ -3460,6 +3645,7 @@ extern "C" void app_main(void) {
             }
         } else {
             load_runtime_control_settings_from_nvs();
+            load_power_settings_from_nvs();
 
             espid::hal_cpp::INetwork::Config wifi_cfg{};
             const bool has_saved_sta = load_sta_credentials_from_nvs(
