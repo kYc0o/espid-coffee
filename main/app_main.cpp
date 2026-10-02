@@ -3200,11 +3200,57 @@ void scale_task(void* arg) {
 
 }  // namespace
 
+// Early timer wake from deep sleep (see deep_sleep.hpp): join Wi-Fi, resync
+// SNTP and sleep again towards the real wake time. Nothing else starts --
+// begin_boot() left every output driven at its inactive level -- and the
+// whole round costs a few seconds of radio. Never returns: if the operator
+// flipped a switch meanwhile, or the wake cannot be re-armed, a restart
+// brings the machine up through the normal boot.
+[[noreturn]] void run_clock_resync() {
+    static espid::wifi::EspWifiNetwork wifi;
+    bool synced = false;
+    if (init_nvs_for_wifi() &&
+        load_sta_credentials_from_nvs(g_saved_sta_ssid, sizeof(g_saved_sta_ssid),
+                                      g_saved_sta_password, sizeof(g_saved_sta_password))) {
+        espid::hal_cpp::INetwork::Config wifi_cfg{};
+        wifi_cfg.sta_ssid           = g_saved_sta_ssid;
+        wifi_cfg.sta_password       = g_saved_sta_password;
+        wifi_cfg.ap_ssid            = cfg::net::kApSsid;
+        wifi_cfg.ap_password        = cfg::net::kApPassword;
+        wifi_cfg.hostname           = cfg::net::kHostname;
+        wifi_cfg.max_sta_retries    = cfg::net::kMaxReconnects;
+        wifi_cfg.reconnect_delay_ms = cfg::net::kReconnectDelayMs;
+        (void)wifi.init(wifi_cfg);
+        const std::uint64_t deadline_ms = uptime_ms() + cfg::power::kResyncWifiWaitMs;
+        while (wifi.state() != espid::hal_cpp::WifiState::kConnected &&
+               uptime_ms() < deadline_ms) {
+            vTaskDelay(pdMS_TO_TICKS(cfg::power::kResyncPollMs));
+        }
+        if (wifi.state() == espid::hal_cpp::WifiState::kConnected &&
+            espid::app::start_sntp()) {
+            synced = espid::app::wait_for_sntp(cfg::power::kResyncSntpWaitMs);
+        }
+    }
+    char now[24];
+    espid::app::local_time_text(now, sizeof(now));
+    ESP_LOGI(kTag, "clock resync: %s, now %s", synced ? "synced" : "RTC estimate kept", now);
+
+    if (espid::app::switches_changed_since_sleep()) {
+        ESP_LOGI(kTag, "clock resync: a switch changed, booting");
+    } else {
+        (void)espid::app::enter_deep_sleep(espid::app::resync_target());
+    }
+    esp_restart();
+}
+
 extern "C" void app_main(void) {
     // Before anything touches a GPIO: drop the latches the last deep sleep
     // left on the outputs.
     (void)espid::app::begin_boot();
     espid::app::init_timezone();
+    if (espid::app::is_clock_resync()) {
+        run_clock_resync();
+    }
     ESP_LOGI(kTag, "boot OK - %s v%u.%u.%u (%s)",
              cfg::kFirmwareName,
              static_cast<unsigned>(cfg::kFwVersionMajor),

@@ -474,6 +474,18 @@ constexpr std::uint32_t kGoodbyeScreenMs        = 1500;
 constexpr std::uint32_t kHeaterSettleMs         = 1100;
 // Remaining-time console log while the countdown runs.
 constexpr std::uint32_t kLogPeriodMs            = 60'000;
+// The board has no 32 kHz crystal: deep sleep runs on the calibrated RC
+// oscillator, which can still drift by a few percent. A long sleep stops
+// short by this fraction (at least kResyncMinMarginS), the early wake only
+// resyncs SNTP and sleeps again; the last leg (<= kPreciseWindowS) goes
+// straight to the target. See power/sleep_planner.hpp.
+constexpr float         kRtcDriftFraction       = 0.03F;
+constexpr std::uint32_t kResyncMinMarginS       = 60;
+constexpr std::uint32_t kPreciseWindowS         = 120;
+// Budget of a resync wake; on timeout the RTC estimate is trusted.
+constexpr std::uint32_t kResyncWifiWaitMs       = 15'000;
+constexpr std::uint32_t kResyncSntpWaitMs       = 10'000;
+constexpr std::uint32_t kResyncPollMs           = 100;
 }  // namespace power
 
 // ---------------------------------------------------------------------------

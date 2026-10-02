@@ -8,6 +8,12 @@
 // machine at the next scheduled time. Any wake is a full reboot, so the
 // normal boot path (fill, heat) runs unchanged afterwards.
 //
+// A long timer sleep is split (power/sleep_planner.hpp): the RC sleep clock
+// drifts, so the chip first wakes early with is_clock_resync() true; the
+// caller then only resyncs SNTP and calls enter_deep_sleep() again with
+// resync_target(), without initialising any peripheral. A switch flipped
+// during the sleep turns that wake into a normal switch wake.
+//
 // Lifecycle:
 //   - begin_boot() first thing in app_main: releases the latches left by
 //     the previous sleep and reports why the chip woke.
@@ -31,12 +37,19 @@ enum class WakeReason : std::uint8_t {
     kBrewSwitch  = 2,
     kSteamSwitch = 3,
     kOther       = 4,
+    kClockResync = 5,  // early timer wake: resync the clock, sleep again
 };
 
 const char* to_string(WakeReason r) noexcept;
 
 WakeReason begin_boot() noexcept;
 WakeReason wake_reason() noexcept;
+
+bool        is_clock_resync() noexcept;
+std::time_t resync_target() noexcept;
+// During a resync wake: has the operator flipped a switch since the chip
+// went to sleep? Then the resync must end in a normal boot, not more sleep.
+bool        switches_changed_since_sleep() noexcept;
 
 // Sleeps until a switch is flipped or, if `wake_at` >= 0, until that epoch.
 // Returns false (without sleeping) only if the wake sources cannot be
