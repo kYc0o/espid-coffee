@@ -52,6 +52,28 @@
     <button type="submit">Save Settings</button>
   </form>
 
+  <h2>Standby</h2>
+  <p>Clock: <strong id="pw-clock">&ndash;</strong> &middot;
+     next wake: <strong id="pw-next">&ndash;</strong> &middot;
+     standby in: <strong id="pw-left">&ndash;</strong></p>
+  <form method="POST" action="/power">
+    <label>Sleep when idle
+      <select name="sb_en" id="sb_en">
+        <option value="1">Yes</option>
+        <option value="0">No</option>
+      </select>
+    </label>
+    <label>Idle time before sleep (min) <input name="sb_min" id="sb_min" type="number" min="5" max="720" required></label>
+    <label>Wake every day
+      <select name="wk_en" id="wk_en">
+        <option value="1">Yes</option>
+        <option value="0">No</option>
+      </select>
+    </label>
+    <label>Wake time (heater on) <input name="wk_time" id="wk_time" type="time" required></label>
+    <button type="submit">Save Standby</button>
+  </form>
+
   <p class="note">
     Leave Wi-Fi password empty for open networks.
     Machine settings are persisted in NVS.

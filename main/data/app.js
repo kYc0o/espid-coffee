@@ -49,4 +49,30 @@
     .catch(function (e) {
       console.warn('Failed to load settings from device:', e);
     });
+
+  // --- Standby / wake schedule from /api/power ---
+  function text(id, value) {
+    var el = document.getElementById(id);
+    if (el) { el.textContent = value; }
+  }
+
+  fetch('/api/power')
+    .then(function (r) {
+      if (!r.ok) { throw new Error('HTTP ' + r.status); }
+      return r.json();
+    })
+    .then(function (p) {
+      ['sb_en', 'sb_min', 'wk_en', 'wk_time'].forEach(function (f) {
+        var el = document.getElementById(f);
+        if (el && p[f] !== undefined) { el.value = p[f]; }
+      });
+      text('pw-clock', p.clock);
+      text('pw-next', p.next_wake);
+      text('pw-left', p.sb_en === '1'
+        ? Math.ceil(p.sleep_in_s / 60) + ' min'
+        : 'off');
+    })
+    .catch(function (e) {
+      console.warn('Failed to load standby settings from device:', e);
+    });
 }());
