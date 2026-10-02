@@ -68,6 +68,12 @@ class Ssd1306Display final : public hal_cpp::IDisplay {
                               hal_cpp::Font font, const char* text) noexcept override;
     hal_cpp::Status flush()                               noexcept override;
 
+    // Panel sleep for deep-sleep standby: display off (0xAE) and charge
+    // pump off (8Dh 10h), the SSD1306 power-down sequence -- a few uA
+    // instead of the mA a lit panel draws. `false` re-enables both; a
+    // reboot re-runs the full init anyway. Same threading rule as flush().
+    hal_cpp::Status set_sleep(bool sleep) noexcept;
+
    private:
     Config                  cfg_{};
     u8g2_esp32_i2c_ctx_t    i2c_ctx_{};

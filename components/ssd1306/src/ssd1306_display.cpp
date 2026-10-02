@@ -115,4 +115,26 @@ hal_cpp::Status Ssd1306Display::flush() noexcept {
     return hal_cpp::Status{};
 }
 
+hal_cpp::Status Ssd1306Display::set_sleep(bool sleep) noexcept {
+    if (!initialised_) {
+        return hal_cpp::Status(hal_cpp::Error::kNotInitialised);
+    }
+    // SSD1306 charge pump setting: 8Dh followed by 10h (off) or 14h (on).
+    constexpr std::uint8_t kChargePumpCmd = 0x8D;
+    constexpr std::uint8_t kChargePumpOff = 0x10;
+    constexpr std::uint8_t kChargePumpOn  = 0x14;
+    u8x8_t* u8x8 = u8g2_GetU8x8(&u8g2_);
+    if (sleep) {
+        u8g2_SetPowerSave(&u8g2_, 1);  // 0xAE: display off
+    }
+    u8x8_cad_StartTransfer(u8x8);
+    u8x8_cad_SendCmd(u8x8, kChargePumpCmd);
+    u8x8_cad_SendArg(u8x8, sleep ? kChargePumpOff : kChargePumpOn);
+    u8x8_cad_EndTransfer(u8x8);
+    if (!sleep) {
+        u8g2_SetPowerSave(&u8g2_, 0);  // 0xAF: display on
+    }
+    return hal_cpp::Status{};
+}
+
 }  // namespace espid::ssd1306
