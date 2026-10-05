@@ -18,6 +18,7 @@
 #include "power/daily_wake.hpp"
 #include "power/sleep_planner.hpp"
 #include "power/wake_pins.hpp"
+#include "power/wake_reason.hpp"
 
 namespace espid::app {
 namespace {
@@ -62,6 +63,7 @@ struct SleepContext {
     bool          resync;    // the timer is set short of wake_at
     bool          brew_on;   // switch levels when the chip went to sleep
     bool          steam_on;
+    std::uint16_t spurious;  // glitch wakes since the last real one
 };
 
 RTC_DATA_ATTR SleepContext g_ctx{};
@@ -69,7 +71,8 @@ RTC_DATA_ATTR SleepContext g_ctx{};
 WakeReason    g_reason        = WakeReason::kPowerOn;
 std::uint32_t g_wake_causes   = 0;  // raw esp_sleep_get_wakeup_causes() bitmap
 std::uint64_t g_wake_ext1     = 0;  // GPIOs that triggered an ext1 wake
-std::time_t g_resync_target = -1;
+std::time_t   g_sleep_target  = -1;
+std::uint16_t g_spurious_seen = 0;  // reported by this (real) boot
 
 bool switch_on(gpio_num_t gpio) noexcept {
     return gpio_get_level(gpio) != 0;
@@ -88,66 +91,23 @@ void configure_switch_inputs() noexcept {
     (void)gpio_config(&c);
 }
 
-WakeReason switch_reason(int gpio) noexcept {
-    if (gpio == static_cast<int>(cfg::brew::kButtonGpio)) {
-        return WakeReason::kBrewSwitch;
-    }
-    if (gpio == static_cast<int>(cfg::steam::kSwitchGpio)) {
-        return WakeReason::kSteamSwitch;
-    }
-    return WakeReason::kOther;
-}
-
 WakeReason classify(std::uint32_t causes) noexcept {
-    if ((causes & BIT(ESP_SLEEP_WAKEUP_UNDEFINED)) != 0U || g_ctx.magic != kMagic) {
-        return WakeReason::kPowerOn;
-    }
-    if ((causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) != 0U) {
-        const std::uint64_t mask = esp_sleep_get_ext1_wakeup_status();
-        if ((mask & (1ULL << static_cast<int>(cfg::brew::kButtonGpio))) != 0U) {
-            return WakeReason::kBrewSwitch;
-        }
-        if ((mask & (1ULL << static_cast<int>(cfg::steam::kSwitchGpio))) != 0U) {
-            return WakeReason::kSteamSwitch;
-        }
-        return WakeReason::kOther;
-    }
-    if ((causes & BIT(ESP_SLEEP_WAKEUP_EXT0)) != 0U) {
-        return switch_reason(g_ctx.ext0_gpio);
-    }
-    if ((causes & BIT(ESP_SLEEP_WAKEUP_TIMER)) != 0U) {
-        if (!g_ctx.resync) {
-            return WakeReason::kSchedule;
-        }
-        // Defensive: ext0/ext1 wake on any switch change, but if one slipped
-        // past the arming (a bounce right at sleep entry), the operator
-        // wants the machine -- boot normally rather than sleep on.
+    espid::power::WakeInputs in{};
+    in.from_deep_sleep = (causes & BIT(ESP_SLEEP_WAKEUP_UNDEFINED)) == 0U;
+    in.context_valid   = g_ctx.magic == kMagic;
+    in.by_switch_line  = (causes & (BIT(ESP_SLEEP_WAKEUP_EXT0) |
+                                    BIT(ESP_SLEEP_WAKEUP_EXT1))) != 0U;
+    in.by_timer        = (causes & BIT(ESP_SLEEP_WAKEUP_TIMER)) != 0U;
+    in.resync_leg      = g_ctx.resync;
+    if (in.from_deep_sleep && in.context_valid) {
         configure_switch_inputs();
-        if (switch_on(cfg::brew::kButtonGpio) != g_ctx.brew_on) {
-            return WakeReason::kBrewSwitch;
-        }
-        if (switch_on(cfg::steam::kSwitchGpio) != g_ctx.steam_on) {
-            return WakeReason::kSteamSwitch;
-        }
-        g_resync_target = static_cast<std::time_t>(g_ctx.wake_at);
-        return WakeReason::kClockResync;
+        in.brew_changed  = switch_on(cfg::brew::kButtonGpio) != g_ctx.brew_on;
+        in.steam_changed = switch_on(cfg::steam::kSwitchGpio) != g_ctx.steam_on;
     }
-    return WakeReason::kOther;
+    return espid::power::classify_wake(in);
 }
 
 }  // namespace
-
-const char* to_string(WakeReason r) noexcept {
-    switch (r) {
-        case WakeReason::kPowerOn:     return "power_on";
-        case WakeReason::kSchedule:    return "schedule";
-        case WakeReason::kBrewSwitch:  return "brew_switch";
-        case WakeReason::kSteamSwitch: return "steam_switch";
-        case WakeReason::kOther:       return "other";
-        case WakeReason::kClockResync: return "clock_resync";
-    }
-    return "?";
-}
 
 WakeReason begin_boot() noexcept {
     for (const auto& o : kHeldOutputs) {
@@ -161,8 +121,20 @@ WakeReason begin_boot() noexcept {
     g_wake_ext1   = esp_sleep_get_ext1_wakeup_status();
     g_reason      = classify(g_wake_causes);
     g_ctx.magic   = 0;  // consumed: a later reset must not look like a wake
-    ESP_LOGI(kTag, "boot: %s (causes=0x%" PRIx32 " ext1=0x%" PRIx64 ")",
-             to_string(g_reason), g_wake_causes, g_wake_ext1);
+    if (g_reason == WakeReason::kClockResync || g_reason == WakeReason::kSpurious) {
+        g_sleep_target = static_cast<std::time_t>(g_ctx.wake_at);
+        if (g_reason == WakeReason::kSpurious && g_ctx.spurious < UINT16_MAX) {
+            ++g_ctx.spurious;
+        }
+    } else {
+        // A real boot reports the glitch wakes since the last one and
+        // starts counting afresh (RTC memory is zeroed on power-on).
+        g_spurious_seen = g_reason == WakeReason::kPowerOn ? 0 : g_ctx.spurious;
+        g_ctx.spurious  = 0;
+    }
+    ESP_LOGI(kTag, "boot: %s (causes=0x%" PRIx32 " ext1=0x%" PRIx64 " spurious=%u)",
+             to_string(g_reason), g_wake_causes, g_wake_ext1,
+             static_cast<unsigned>(g_ctx.spurious));
     return g_reason;
 }
 
@@ -182,8 +154,16 @@ bool is_clock_resync() noexcept {
     return g_reason == WakeReason::kClockResync;
 }
 
-std::time_t resync_target() noexcept {
-    return g_resync_target;
+bool is_spurious_wake() noexcept {
+    return g_reason == WakeReason::kSpurious;
+}
+
+std::time_t sleep_target() noexcept {
+    return g_sleep_target;
+}
+
+std::uint16_t spurious_wakes() noexcept {
+    return g_spurious_seen;
 }
 
 bool switches_changed_since_sleep() noexcept {

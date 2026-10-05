@@ -11,8 +11,10 @@
 // A long timer sleep is split (power/sleep_planner.hpp): the RC sleep clock
 // drifts, so the chip first wakes early with is_clock_resync() true; the
 // caller then only resyncs SNTP and calls enter_deep_sleep() again with
-// resync_target(), without initialising any peripheral. A switch flipped
-// during the sleep turns that wake into a normal switch wake.
+// sleep_target(), without initialising any peripheral. A switch flipped
+// during the sleep turns that wake into a normal switch wake. A switch-line
+// wake with neither switch moved is a glitch and goes back to sleep the
+// same way (power/wake_reason.hpp).
 //
 // Lifecycle:
 //   - begin_boot() first thing in app_main: releases the latches left by
@@ -29,18 +31,12 @@
 #include <cstdint>
 #include <ctime>
 
+#include "power/wake_reason.hpp"
+
 namespace espid::app {
 
-enum class WakeReason : std::uint8_t {
-    kPowerOn     = 0,  // power-on, reset or OTA reboot: not a wake from sleep
-    kSchedule    = 1,  // daily wake time reached
-    kBrewSwitch  = 2,
-    kSteamSwitch = 3,
-    kOther       = 4,
-    kClockResync = 5,  // early timer wake: resync the clock, sleep again
-};
-
-const char* to_string(WakeReason r) noexcept;
+using espid::power::WakeReason;
+using espid::power::to_string;
 
 WakeReason begin_boot() noexcept;
 WakeReason wake_reason() noexcept;
@@ -50,7 +46,13 @@ std::uint32_t wake_causes() noexcept;
 std::uint64_t wake_ext1_mask() noexcept;
 
 bool        is_clock_resync() noexcept;
-std::time_t resync_target() noexcept;
+// A wake through the switch lines with no switch moved (a glitch on the
+// wiring): the caller goes straight back to sleep towards sleep_target().
+bool        is_spurious_wake() noexcept;
+// The wake time a resync or spurious wake goes back to sleep towards.
+std::time_t sleep_target() noexcept;
+// Glitch wakes since the previous real wake, reported by a real boot.
+std::uint16_t spurious_wakes() noexcept;
 // During a resync wake: has the operator flipped a switch since the chip
 // went to sleep? Then the resync must end in a normal boot, not more sleep.
 bool        switches_changed_since_sleep() noexcept;

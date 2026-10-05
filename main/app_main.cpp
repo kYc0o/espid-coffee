@@ -2245,7 +2245,8 @@ void mqtt_task(void* /*arg*/) {
                         ",\"steam\":%u,\"brewing\":%u,\"estop\":%u"
                         ",\"free_heap\":%" PRIu32 ",\"min_free_heap\":%" PRIu32
                         ",\"wifi_rssi\":%d,\"wake_id\":%u,\"wake_causes\":%" PRIu32
-                        ",\"wake_ext1\":%" PRIu32 ",\"sleep_in_s\":%" PRIu32 "}",
+                        ",\"wake_ext1\":%" PRIu32 ",\"spurious_wakes\":%u"
+                        ",\"sleep_in_s\":%" PRIu32 "}",
                         static_cast<unsigned>(cfg::mqtt::RecordType::kStatus),
                         now_ms, hb,
                         espid::ui::to_string(machine_status),
@@ -2268,6 +2269,7 @@ void mqtt_task(void* /*arg*/) {
                         static_cast<unsigned>(espid::app::wake_reason()),
                         espid::app::wake_causes(),
                         static_cast<std::uint32_t>(espid::app::wake_ext1_mask()),
+                        static_cast<unsigned>(espid::app::spurious_wakes()),
                         g_sleep_in_s.load(std::memory_order_relaxed));
                     if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
                         publish_payload(payload);
@@ -3465,7 +3467,7 @@ void scale_task(void* arg) {
     if (espid::app::switches_changed_since_sleep()) {
         ESP_LOGI(kTag, "clock resync: a switch changed, booting");
     } else {
-        (void)espid::app::enter_deep_sleep(espid::app::resync_target());
+        (void)espid::app::enter_deep_sleep(espid::app::sleep_target());
     }
     esp_restart();
 }
@@ -3477,6 +3479,11 @@ extern "C" void app_main(void) {
     espid::app::init_timezone();
     if (espid::app::is_clock_resync()) {
         run_clock_resync();
+    }
+    if (espid::app::is_spurious_wake()) {
+        // Nobody touched a switch: back to sleep before anything powers up.
+        (void)espid::app::enter_deep_sleep(espid::app::sleep_target());
+        esp_restart();
     }
     ESP_LOGI(kTag, "boot OK - %s v%u.%u.%u (%s)",
              cfg::kFirmwareName,
