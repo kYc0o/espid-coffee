@@ -2244,7 +2244,8 @@ void mqtt_task(void* /*arg*/) {
                         ",\"pressure_bar\":%.3f,\"pump_pct\":%.1f"
                         ",\"steam\":%u,\"brewing\":%u,\"estop\":%u"
                         ",\"free_heap\":%" PRIu32 ",\"min_free_heap\":%" PRIu32
-                        ",\"wifi_rssi\":%d,\"wake_id\":%u,\"sleep_in_s\":%" PRIu32 "}",
+                        ",\"wifi_rssi\":%d,\"wake_id\":%u,\"wake_causes\":%" PRIu32
+                        ",\"wake_ext1\":%" PRIu32 ",\"sleep_in_s\":%" PRIu32 "}",
                         static_cast<unsigned>(cfg::mqtt::RecordType::kStatus),
                         now_ms, hb,
                         espid::ui::to_string(machine_status),
@@ -2265,6 +2266,8 @@ void mqtt_task(void* /*arg*/) {
                         static_cast<std::uint32_t>(esp_get_minimum_free_heap_size()),
                         rssi,
                         static_cast<unsigned>(espid::app::wake_reason()),
+                        espid::app::wake_causes(),
+                        static_cast<std::uint32_t>(espid::app::wake_ext1_mask()),
                         g_sleep_in_s.load(std::memory_order_relaxed));
                     if (n > 0 && static_cast<std::size_t>(n) < sizeof(payload)) {
                         publish_payload(payload);

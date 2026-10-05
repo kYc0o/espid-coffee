@@ -66,7 +66,9 @@ struct SleepContext {
 
 RTC_DATA_ATTR SleepContext g_ctx{};
 
-WakeReason  g_reason        = WakeReason::kPowerOn;
+WakeReason    g_reason        = WakeReason::kPowerOn;
+std::uint32_t g_wake_causes   = 0;  // raw esp_sleep_get_wakeup_causes() bitmap
+std::uint64_t g_wake_ext1     = 0;  // GPIOs that triggered an ext1 wake
 std::time_t g_resync_target = -1;
 
 bool switch_on(gpio_num_t gpio) noexcept {
@@ -155,14 +157,25 @@ WakeReason begin_boot() noexcept {
     }
     gpio_deep_sleep_hold_dis();
 
-    g_reason    = classify(esp_sleep_get_wakeup_causes());
-    g_ctx.magic = 0;  // consumed: a later reset must not look like a wake
-    ESP_LOGI(kTag, "boot: %s", to_string(g_reason));
+    g_wake_causes = esp_sleep_get_wakeup_causes();
+    g_wake_ext1   = esp_sleep_get_ext1_wakeup_status();
+    g_reason      = classify(g_wake_causes);
+    g_ctx.magic   = 0;  // consumed: a later reset must not look like a wake
+    ESP_LOGI(kTag, "boot: %s (causes=0x%" PRIx32 " ext1=0x%" PRIx64 ")",
+             to_string(g_reason), g_wake_causes, g_wake_ext1);
     return g_reason;
 }
 
 WakeReason wake_reason() noexcept {
     return g_reason;
+}
+
+std::uint32_t wake_causes() noexcept {
+    return g_wake_causes;
+}
+
+std::uint64_t wake_ext1_mask() noexcept {
+    return g_wake_ext1;
 }
 
 bool is_clock_resync() noexcept {

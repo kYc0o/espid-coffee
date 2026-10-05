@@ -44,6 +44,10 @@ const char* to_string(WakeReason r) noexcept;
 
 WakeReason begin_boot() noexcept;
 WakeReason wake_reason() noexcept;
+// Raw inputs behind wake_reason(), for diagnosing an unexpected wake:
+// BIT(esp_sleep_source_t) bitmap, and the GPIO mask of an ext1 wake.
+std::uint32_t wake_causes() noexcept;
+std::uint64_t wake_ext1_mask() noexcept;
 
 bool        is_clock_resync() noexcept;
 std::time_t resync_target() noexcept;
