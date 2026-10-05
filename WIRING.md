@@ -105,6 +105,15 @@ the state that draws least and keeps the mains hardware off
 | `GPIO18` zero-cross | released | The external 10 kΩ pull-up still conducts while the opto pulses (tens of µA); only rewiring would avoid it. |
 | `GPIO21` HX711 SCK | released | HX711 boards not fitted. If fitted, hold SCK **high** in sleep (and while the scale is disabled) — that is their power-down. |
 
+The internal pull-downs are weak (~45 kΩ) and the switch wires run next
+to mains wiring inside the machine, so a pulse can wake the chip. The
+firmware checks the switch levels on every switch-line wake and goes
+straight back to sleep if neither moved (`spurious_wakes` in the status
+record counts these). If that count keeps climbing, fit external
+**10 kΩ pull-downs** (optionally with 100 nF to GND) on `GPIO4` and
+`GPIO5`: a stiffer line, and no need for the RTC peripheral domain in
+sleep.
+
 What remains is board-level and not firmware-controllable: the DevKit's
 power LED, the RGB LED's idle current, the 3V3 regulator and the mains
 5 V supply's own no-load loss.

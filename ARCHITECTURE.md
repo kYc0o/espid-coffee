@@ -277,9 +277,12 @@ half-cycles fired and the temperature drop, the two handles for estimating
 how much water went back in.
 
 Standby. The machine stays mains-powered; standby is ESP32-S3 deep sleep.
-power_task counts down `power::InactivityTimer` (default 90 min): a steam
-switch change or a settings save restarts it; a shot, a refill, the
-startup fill or an OTA download hold it. On expiry it raises
+power_task counts down `power::InactivityTimer` (default 90 min): a shot
+or refill (while it lasts), a steam switch change or a settings save
+restarts it; the startup fill and a hawkbit poll or download only defer
+the sleep while they run (a poll every 5 min restarting it kept the
+machine awake for good). The web UI "Sleep now" (`POST /power/sleep`)
+skips the countdown. On expiry it raises
 `g_sleep_pending`, which parks the other tasks -- control_task forces the
 heater to 0 %, mqtt_task sends the `sleep` record, display_task shows a
 goodbye screen and puts the panel to sleep (charge pump off) -- then calls
@@ -290,7 +293,10 @@ off switches on ext1 "any high", one left on via ext0 when it turns off);
 an RTC timer wakes the machine at the daily wake time when SNTP has set
 the clock since power-on. Every wake is a full reboot through the normal
 power-on path; `begin_boot()` drops the latches first and classifies the
-wake. Without a 32 kHz crystal the sleep clock drifts a few percent, so a
+wake (`power::classify_wake`) by comparing the switch levels with those
+at sleep time -- the ext1 status register is not trusted. A switch-line
+wake with neither switch moved is a glitch and goes straight back to
+sleep, counted in `spurious_wakes`. Without a 32 kHz crystal the sleep clock drifts a few percent, so a
 long sleep is split by `power::plan_sleep()`: early timer wakes only join
 Wi-Fi, resync SNTP and sleep again (`run_clock_resync()`), and the last
 leg of <= 2 min is slept straight to the target.
