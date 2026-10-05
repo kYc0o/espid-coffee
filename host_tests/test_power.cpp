@@ -11,6 +11,7 @@
 #include "power/sleep_planner.hpp"
 #include "power/time_of_day.hpp"
 #include "power/wake_pins.hpp"
+#include "power/wake_reason.hpp"
 
 namespace {
 
@@ -242,6 +243,68 @@ TEST(TimeOfDay, FormatsAndRoundTrips) {
     EXPECT_EQ(m, 545);
     EXPECT_FALSE(format_time_of_day(1440, buf, sizeof(buf)));
     EXPECT_FALSE(format_time_of_day(0, buf, 5));
+}
+
+// ---------------- classify_wake ----------------
+
+using espid::power::classify_wake;
+using espid::power::WakeInputs;
+using espid::power::WakeReason;
+
+WakeInputs slept() {
+    WakeInputs in{};
+    in.from_deep_sleep = true;
+    in.context_valid   = true;
+    return in;
+}
+
+TEST(WakeReason, ResetOrUnknownContextIsAPowerOn) {
+    EXPECT_EQ(classify_wake(WakeInputs{}), WakeReason::kPowerOn);
+    WakeInputs in = slept();
+    in.context_valid = false;
+    in.by_timer      = true;
+    EXPECT_EQ(classify_wake(in), WakeReason::kPowerOn);
+}
+
+TEST(WakeReason, SwitchLineWakeIsAttributedByTheLevelThatMoved) {
+    WakeInputs in = slept();
+    in.by_switch_line = true;
+    in.steam_changed  = true;
+    EXPECT_EQ(classify_wake(in), WakeReason::kSteamSwitch);
+    in.brew_changed = true;  // both moved: brew first
+    EXPECT_EQ(classify_wake(in), WakeReason::kBrewSwitch);
+}
+
+// 2026-10-05 07:29: woke through the switch lines, nobody touched anything.
+TEST(WakeReason, SwitchLineWakeWithNoSwitchMovedIsSpurious) {
+    WakeInputs in = slept();
+    in.by_switch_line = true;
+    EXPECT_EQ(classify_wake(in), WakeReason::kSpurious);
+}
+
+TEST(WakeReason, TimerWakeIsScheduleOrResync) {
+    WakeInputs in = slept();
+    in.by_timer = true;
+    EXPECT_EQ(classify_wake(in), WakeReason::kSchedule);
+    in.resync_leg = true;
+    EXPECT_EQ(classify_wake(in), WakeReason::kClockResync);
+}
+
+TEST(WakeReason, AMovedSwitchWinsOverTheTimer) {
+    WakeInputs in = slept();
+    in.by_timer     = true;
+    in.resync_leg   = true;
+    in.brew_changed = true;
+    EXPECT_EQ(classify_wake(in), WakeReason::kBrewSwitch);
+}
+
+TEST(WakeReason, NoKnownSourceIsOther) {
+    EXPECT_EQ(classify_wake(slept()), WakeReason::kOther);
+}
+
+TEST(WakeReason, StableNames) {
+    EXPECT_STREQ(espid::power::to_string(WakeReason::kSpurious), "spurious");
+    EXPECT_STREQ(espid::power::to_string(WakeReason::kClockResync), "clock_resync");
 }
 
 }  // namespace
