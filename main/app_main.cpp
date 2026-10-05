@@ -3194,10 +3194,14 @@ std::uint64_t uptime_ms() noexcept {
     return static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
 }
 
-// Standby countdown and sleep sequence. Steam switch changes and settings
-// changes restart the countdown; a shot, a refill, the startup fill or an
-// OTA download hold it. On expiry the other tasks are parked (heater off,
-// last MQTT record out, panel off) before the chip enters deep sleep.
+// Standby countdown and sleep sequence. Operator activity restarts the
+// countdown: a shot or a refill (for as long as it lasts), a steam switch
+// change, a settings save. The startup fill and a hawkbit poll or download
+// only defer the sleep while they run -- they are not the operator, and
+// the poll comes every 5 min, so letting it restart the countdown kept the
+// machine from ever sleeping on any timeout above 5 min. On expiry the
+// other tasks are parked (heater off, last MQTT record out, panel off)
+// before the chip enters deep sleep.
 void power_task(void* /*arg*/) {
     const auto timer_config = [] {
         espid::power::InactivityTimer::Config c{};
@@ -3217,14 +3221,15 @@ void power_task(void* /*arg*/) {
 
         const bool steam = g_steam_active.load(std::memory_order_relaxed);
         const std::uint32_t activity = g_activity_seq.load(std::memory_order_acquire);
-        const bool busy =
+        const bool operator_busy =
             g_shot.running.load(std::memory_order_relaxed) ||
             g_refill_switch.load(std::memory_order_acquire) ||
             g_refill.state.load(std::memory_order_acquire) !=
-                static_cast<std::uint8_t>(espid::pump::RefillSequencer::State::kIdle) ||
-            g_ota_busy.load(std::memory_order_acquire) ||
-            !g_fill_complete.load(std::memory_order_acquire);
-        if (busy || steam != steam_was || activity != activity_seen) {
+                static_cast<std::uint8_t>(espid::pump::RefillSequencer::State::kIdle);
+        const bool busy = operator_busy ||
+                          g_ota_busy.load(std::memory_order_acquire) ||
+                          !g_fill_complete.load(std::memory_order_acquire);
+        if (operator_busy || steam != steam_was || activity != activity_seen) {
             timer.touch(now_ms);
         }
         steam_was     = steam;
@@ -3239,7 +3244,7 @@ void power_task(void* /*arg*/) {
         // "Sleep now" skips the countdown, but still waits for a shot, a
         // refill, the startup fill or an OTA download to finish.
         const bool sleep_now = !busy && g_sleep_now.load(std::memory_order_acquire);
-        if (!sleep_now && !timer.expired(now_ms)) {
+        if (!sleep_now && (busy || !timer.expired(now_ms))) {
             continue;
         }
         g_sleep_now.store(false, std::memory_order_relaxed);
