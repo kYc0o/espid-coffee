@@ -13,6 +13,7 @@
 #include "power/time_of_day.hpp"
 #include "power/wake_pins.hpp"
 #include "power/wake_reason.hpp"
+#include "power/weekly_schedule.hpp"
 
 namespace {
 
@@ -356,6 +357,68 @@ TEST(StandbyActivity, FinishedRefillWithSwitchStillOnIsNotActivity) {
     const auto e = standby_effect(a);
     EXPECT_FALSE(e.restart_countdown);
     EXPECT_FALSE(e.defer_sleep);
+}
+
+// ---------------- next_weekly_wake ----------------
+
+using espid::power::next_weekly_wake;
+using espid::power::WeeklySchedule;
+
+// tm_wday indices.
+constexpr int kSun = 0, kMon = 1, kTue = 2, kSat = 6;
+
+// Weekdays 08:00, Saturday 09:30, Sunday 10:00.
+WeeklySchedule workweek() {
+    WeeklySchedule s;
+    for (int d = kMon; d <= 5; ++d) s.minute_of_day[d] = 8 * 60;
+    s.minute_of_day[kSat] = 9 * 60 + 30;
+    s.minute_of_day[kSun] = 10 * 60;
+    return s;
+}
+
+TEST_F(DailyWake, WeeklyPicksTomorrowsOwnTime) {
+    // Mon 2026-10-26 11:00 -> Tue 08:00.
+    EXPECT_EQ(next_weekly_wake(1793008800, workweek()), 1793084400);
+}
+
+TEST_F(DailyWake, WeeklyLaterTheSameDay) {
+    // Mon 07:00 -> Mon 08:00.
+    EXPECT_EQ(next_weekly_wake(1792994400, workweek()), 1792998000);
+}
+
+TEST_F(DailyWake, WeeklyUsesWeekendTimes) {
+    // Sat 2026-10-24 12:00 (past Saturday's 09:30) -> Sun 10:00, the day
+    // summer time ends (25 h day).
+    EXPECT_EQ(next_weekly_wake(1792836000, workweek()), 1792918800);
+}
+
+TEST_F(DailyWake, WeeklySkipsDisabledDays) {
+    WeeklySchedule s = workweek();
+    s.minute_of_day[kTue] = -1;
+    s.minute_of_day[3] = -1;
+    s.minute_of_day[4] = -1;
+    s.minute_of_day[5] = -1;
+    // Mon 11:00 -> Sat 09:30.
+    EXPECT_EQ(next_weekly_wake(1793008800, s), 1793435400);
+}
+
+TEST_F(DailyWake, WeeklySingleDayWrapsAWeek) {
+    WeeklySchedule s;
+    s.minute_of_day[kMon] = 7 * 60;
+    // Mon 07:00 exactly -> the next Monday 07:00.
+    EXPECT_EQ(next_weekly_wake(1792994400, s), 1793599200);
+}
+
+TEST_F(DailyWake, WeeklyAllOffOrUnsetClock) {
+    EXPECT_EQ(next_weekly_wake(1793008800, WeeklySchedule{}), -1);
+    EXPECT_EQ(next_weekly_wake(3600, workweek()), -1);
+}
+
+TEST_F(DailyWake, WeeklyEveryDayMatchesDaily) {
+    const auto s = WeeklySchedule::every_day(9 * 60);
+    for (const std::time_t now : {1790920800L, 1774688400L, 1792828800L}) {
+        EXPECT_EQ(next_weekly_wake(now, s), espid::power::next_daily_wake(now, 9 * 60));
+    }
 }
 
 }  // namespace
