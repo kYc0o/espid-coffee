@@ -2463,6 +2463,7 @@ void control_task(void* arg) {
         pcfg.d_filter_tau_s = cfg::pid::kDerivativeFilterTauS;
         pcfg.conditional_integration = true;
         pcfg.integral_band = cfg::pid::kIntegralBandC;
+        pcfg.free_integration_band = cfg::pid::kFreeIntegrationBandC;
         controller.set_config(pcfg);
 
         const std::uint64_t brew_pulse_ms = static_cast<std::uint64_t>(
