@@ -44,6 +44,7 @@
 #include "pid/telemetry_policy.hpp"
 #include "power/daily_wake.hpp"
 #include "power/time_of_day.hpp"
+#include "power/weekly_schedule.hpp"
 #include "power/inactivity_timer.hpp"
 #include "power/standby_activity.hpp"
 #include "pump/refill_sequencer.hpp"
@@ -240,8 +241,15 @@ constexpr const char* kCfgMqttClientId = "mqtt_client";
 // Standby / wake schedule (own form and endpoint: /power, /api/power).
 constexpr const char* kCfgStandbyEnabled = "sb_en";
 constexpr const char* kCfgStandbyMinutes = "sb_min";
+// Single daily wake from 0.0.10..0.0.14; read once to seed the weekly days.
 constexpr const char* kCfgWakeEnabled    = "wk_en";
 constexpr const char* kCfgWakeTime       = "wk_time";
+// Weekly schedule: "wk_d<tm_wday>" = "HH:MM" (on) or "!HH:MM" (off, time
+// kept for the form). Form fields: wk_t<d> (time), wk_on<d> ("1" if on).
+constexpr const char* kCfgWakeDayFmt     = "wk_d%d";
+constexpr const char* kFormWakeTimeFmt   = "wk_t%d";
+constexpr const char* kFormWakeOnFmt     = "wk_on%d";
+constexpr std::size_t kWakeKeyLen        = 8;
 
 bool load_setting_from_nvs(const char* key, const char* fallback,
                            char* out, std::size_t out_len) noexcept;
@@ -374,10 +382,22 @@ std::atomic<bool> g_emergency_stop{false};
 struct PowerSettings {
     std::atomic<bool>          standby_enabled{cfg::power::kStandbyEnabledDefault};
     std::atomic<std::uint32_t> standby_timeout_min{cfg::power::kStandbyTimeoutMinDefault};
-    std::atomic<bool>          wake_enabled{cfg::power::kWakeEnabledDefault};
-    std::atomic<int>           wake_minute{cfg::power::kWakeMinuteDefault};
+    // Per weekday (tm_wday). Zero-initialised (all off) until NVS loads.
+    std::atomic<int>           wake_minute[espid::power::kDaysPerWeek];
+    std::atomic<bool>          wake_on[espid::power::kDaysPerWeek];
 };
 PowerSettings g_power;
+
+espid::power::WeeklySchedule wake_schedule() noexcept {
+    espid::power::WeeklySchedule s;
+    for (int d = 0; d < espid::power::kDaysPerWeek; ++d) {
+        s.minute_of_day[static_cast<std::size_t>(d)] =
+            g_power.wake_on[d].load(std::memory_order_relaxed)
+                ? g_power.wake_minute[d].load(std::memory_order_relaxed)
+                : -1;
+    }
+    return s;
+}
 std::atomic<std::uint32_t> g_activity_seq{0};  // bumped by operator actions with no other trace
 std::atomic<bool>          g_ota_busy{false};
 std::atomic<bool>          g_sleep_pending{false};
@@ -843,13 +863,30 @@ void load_power_settings_from_nvs() noexcept {
                            cfg::power::kStandbyTimeoutMinMax, &minutes)) {
         g_power.standby_timeout_min.store(minutes, std::memory_order_relaxed);
     }
-    if (load_setting_from_nvs(kCfgWakeEnabled, nullptr, value, sizeof(value)) &&
-        parse_flag(value, &flag)) {
-        g_power.wake_enabled.store(flag, std::memory_order_relaxed);
+    // Days without their own entry inherit the old single daily wake.
+    bool legacy_on = cfg::power::kWakeEnabledDefault;
+    int  legacy_minute = cfg::power::kWakeMinuteDefault;
+    if (load_setting_from_nvs(kCfgWakeEnabled, nullptr, value, sizeof(value))) {
+        (void)parse_flag(value, &legacy_on);
     }
     if (load_setting_from_nvs(kCfgWakeTime, nullptr, value, sizeof(value)) &&
         espid::power::parse_time_of_day(value, &minute_of_day)) {
-        g_power.wake_minute.store(minute_of_day, std::memory_order_relaxed);
+        legacy_minute = minute_of_day;
+    }
+    for (int d = 0; d < espid::power::kDaysPerWeek; ++d) {
+        bool on   = legacy_on;
+        int  mins = legacy_minute;
+        char key[kWakeKeyLen];
+        std::snprintf(key, sizeof(key), kCfgWakeDayFmt, d);
+        if (load_setting_from_nvs(key, nullptr, value, sizeof(value))) {
+            const bool off = value[0] == '!';
+            if (espid::power::parse_time_of_day(off ? value + 1 : value, &minute_of_day)) {
+                on   = !off;
+                mins = minute_of_day;
+            }
+        }
+        g_power.wake_minute[d].store(mins, std::memory_order_relaxed);
+        g_power.wake_on[d].store(on, std::memory_order_relaxed);
     }
 }
 
@@ -1404,36 +1441,45 @@ esp_err_t settings_post_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// GET /api/power — standby and wake-schedule settings plus clock state.
+// GET /api/power — standby and weekly wake settings plus clock state.
 esp_err_t api_power_get_handler(httpd_req_t* req) {
-    char wake_time[8];
-    if (!espid::power::format_time_of_day(g_power.wake_minute.load(std::memory_order_relaxed),
-                                          wake_time, sizeof(wake_time))) {
-        std::snprintf(wake_time, sizeof(wake_time), "09:00");
-    }
     char clock[24];
     espid::app::local_time_text(clock, sizeof(clock));
 
     char next_wake[24] = "none";
-    if (g_power.wake_enabled.load(std::memory_order_relaxed) && espid::app::clock_is_set()) {
-        const std::time_t at = espid::power::next_daily_wake(
-            std::time(nullptr), g_power.wake_minute.load(std::memory_order_relaxed));
+    if (espid::app::clock_is_set()) {
+        const std::time_t at = espid::power::next_weekly_wake(std::time(nullptr), wake_schedule());
         std::tm local{};
         if (at >= 0 && localtime_r(&at, &local) != nullptr) {
-            std::strftime(next_wake, sizeof(next_wake), "%Y-%m-%d %H:%M", &local);
+            std::strftime(next_wake, sizeof(next_wake), "%a %Y-%m-%d %H:%M", &local);
         }
     }
 
-    char json[256];
+    char days[256];
+    std::size_t used = 0;
+    for (int d = 0; d < espid::power::kDaysPerWeek; ++d) {
+        char hhmm[8];
+        if (!espid::power::format_time_of_day(g_power.wake_minute[d].load(std::memory_order_relaxed),
+                                              hhmm, sizeof(hhmm))) {
+            std::snprintf(hhmm, sizeof(hhmm), "09:00");
+        }
+        const int n = std::snprintf(days + used, sizeof(days) - used,
+                                    "\"wk_t%d\":\"%s\",\"wk_on%d\":\"%u\",", d, hhmm, d,
+                                    g_power.wake_on[d].load(std::memory_order_relaxed) ? 1U : 0U);
+        if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(days) - used) {
+            return httpd_resp_send_500(req);
+        }
+        used += static_cast<std::size_t>(n);
+    }
+
+    char json[448];
     const int n = std::snprintf(
         json, sizeof(json),
-        "{\"sb_en\":\"%u\",\"sb_min\":\"%" PRIu32 "\",\"wk_en\":\"%u\","
-        "\"wk_time\":\"%s\",\"clock\":\"%s\",\"next_wake\":\"%s\","
-        "\"sleep_in_s\":%" PRIu32 "}",
+        "{\"sb_en\":\"%u\",\"sb_min\":\"%" PRIu32 "\",%s"
+        "\"clock\":\"%s\",\"next_wake\":\"%s\",\"sleep_in_s\":%" PRIu32 "}",
         g_power.standby_enabled.load(std::memory_order_relaxed) ? 1U : 0U,
         g_power.standby_timeout_min.load(std::memory_order_relaxed),
-        g_power.wake_enabled.load(std::memory_order_relaxed) ? 1U : 0U,
-        wake_time, clock, next_wake,
+        days, clock, next_wake,
         g_sleep_in_s.load(std::memory_order_relaxed));
     if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(json)) {
         return httpd_resp_send_500(req);
@@ -1443,7 +1489,9 @@ esp_err_t api_power_get_handler(httpd_req_t* req) {
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
-// POST /power — sb_en (0/1), sb_min (minutes), wk_en (0/1), wk_time (HH:MM).
+// POST /power — sb_en (0/1), sb_min (minutes), and per weekday d (tm_wday)
+// wk_t<d> (HH:MM) plus wk_on<d>=1 when that day wakes (an unchecked box is
+// absent). A day that is off may leave its time empty; it keeps the old one.
 // Saving counts as activity, so the standby countdown restarts.
 esp_err_t power_post_handler(httpd_req_t* req) {
     if (req->content_len <= 0 ||
@@ -1469,12 +1517,8 @@ esp_err_t power_post_handler(httpd_req_t* req) {
     };
     char sb_en_txt[4]{};
     char sb_min_txt[8]{};
-    char wk_en_txt[4]{};
-    char wk_time_txt[8]{};
     bool sb_en = false;
-    bool wk_en = false;
     std::uint16_t sb_min = 0;
-    int wk_minute = 0;
     if (!form_field(body, kCfgStandbyEnabled, sb_en_txt, sizeof(sb_en_txt)) ||
         !parse_flag(sb_en_txt, &sb_en)) {
         return reject("Invalid sb_en");
@@ -1484,36 +1528,42 @@ esp_err_t power_post_handler(httpd_req_t* req) {
                             cfg::power::kStandbyTimeoutMinMax, &sb_min)) {
         return reject("Invalid sb_min");
     }
-    if (!form_field(body, kCfgWakeEnabled, wk_en_txt, sizeof(wk_en_txt)) ||
-        !parse_flag(wk_en_txt, &wk_en)) {
-        return reject("Invalid wk_en");
+    int  day_minute[espid::power::kDaysPerWeek];
+    bool day_on[espid::power::kDaysPerWeek];
+    char day_value[espid::power::kDaysPerWeek][10];  // "!" + HH:MM, with room the compiler can prove
+    for (int d = 0; d < espid::power::kDaysPerWeek; ++d) {
+        char key[kWakeKeyLen];
+        char txt[8]{};
+        std::snprintf(key, sizeof(key), kFormWakeOnFmt, d);
+        day_on[d] = form_field(body, key, txt, sizeof(txt)) && std::strcmp(txt, "1") == 0;
+        std::snprintf(key, sizeof(key), kFormWakeTimeFmt, d);
+        txt[0] = '\0';
+        const bool has_time = form_field(body, key, txt, sizeof(txt)) &&
+                              espid::power::parse_time_of_day(txt, &day_minute[d]);
+        if (!has_time) {
+            if (day_on[d]) {
+                return reject("Invalid wake time for an enabled day");
+            }
+            day_minute[d] = g_power.wake_minute[d].load(std::memory_order_relaxed);
+        }
+        char hhmm[8];
+        (void)espid::power::format_time_of_day(day_minute[d], hhmm, sizeof(hhmm));
+        std::snprintf(day_value[d], sizeof(day_value[d]), "%s%s", day_on[d] ? "" : "!", hhmm);
     }
-    if (!form_field(body, kCfgWakeTime, wk_time_txt, sizeof(wk_time_txt)) ||
-        !espid::power::parse_time_of_day(wk_time_txt, &wk_minute)) {
-        return reject("Invalid wk_time");
-    }
-    char wk_time_norm[8];
-    (void)espid::power::format_time_of_day(wk_minute, wk_time_norm, sizeof(wk_time_norm));
 
     nvs_handle_t nvs{};
     esp_err_t err = nvs_open(kCfgNvsNamespace, NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
         return httpd_resp_send_500(req);
     }
-    const struct {
-        const char* key;
-        const char* value;
-    } entries[] = {
-        {kCfgStandbyEnabled, sb_en ? "1" : "0"},
-        {kCfgStandbyMinutes, sb_min_txt},
-        {kCfgWakeEnabled, wk_en ? "1" : "0"},
-        {kCfgWakeTime, wk_time_norm},
-    };
-    for (const auto& e : entries) {
-        err = nvs_set_str(nvs, e.key, e.value);
-        if (err != ESP_OK) {
-            break;
-        }
+    err = nvs_set_str(nvs, kCfgStandbyEnabled, sb_en ? "1" : "0");
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, kCfgStandbyMinutes, sb_min_txt);
+    }
+    for (int d = 0; d < espid::power::kDaysPerWeek && err == ESP_OK; ++d) {
+        char key[kWakeKeyLen];
+        std::snprintf(key, sizeof(key), kCfgWakeDayFmt, d);
+        err = nvs_set_str(nvs, key, day_value[d]);
     }
     if (err == ESP_OK) {
         err = nvs_commit(nvs);
@@ -1525,12 +1575,17 @@ esp_err_t power_post_handler(httpd_req_t* req) {
 
     g_power.standby_enabled.store(sb_en, std::memory_order_relaxed);
     g_power.standby_timeout_min.store(sb_min, std::memory_order_relaxed);
-    g_power.wake_enabled.store(wk_en, std::memory_order_relaxed);
-    g_power.wake_minute.store(wk_minute, std::memory_order_relaxed);
+    for (int d = 0; d < espid::power::kDaysPerWeek; ++d) {
+        g_power.wake_minute[d].store(day_minute[d], std::memory_order_relaxed);
+        g_power.wake_on[d].store(day_on[d], std::memory_order_relaxed);
+    }
     g_activity_seq.fetch_add(1, std::memory_order_release);
-    ESP_LOGI(kTag, "power settings: standby %s after %u min, wake %s at %s",
-             sb_en ? "on" : "off", static_cast<unsigned>(sb_min),
-             wk_en ? "on" : "off", wk_time_norm);
+    ESP_LOGI(kTag,
+             "power settings: standby %s after %u min, wake Su %s Mo %s Tu %s We %s "
+             "Th %s Fr %s Sa %s",
+             sb_en ? "on" : "off", static_cast<unsigned>(sb_min), day_value[0],
+             day_value[1], day_value[2], day_value[3], day_value[4], day_value[5],
+             day_value[6]);
 
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(
@@ -2650,7 +2705,7 @@ void display_task(void* arg) {
                     static_cast<std::time_t>(g_sleep_wake_at.load(std::memory_order_relaxed));
                 std::tm local{};
                 if (wake_at >= 0 && localtime_r(&wake_at, &local) != nullptr) {
-                    std::strftime(wake_line, sizeof(wake_line), "wake %H:%M", &local);
+                    std::strftime(wake_line, sizeof(wake_line), "wake %a %H:%M", &local);
                 } else {
                     std::snprintf(wake_line, sizeof(wake_line), "wake: switch");
                 }
@@ -3258,10 +3313,8 @@ void power_task(void* /*arg*/) {
         g_sleep_manual.store(sleep_now, std::memory_order_relaxed);
 
         std::time_t wake_at = -1;
-        if (g_power.wake_enabled.load(std::memory_order_relaxed) &&
-            espid::app::clock_is_set()) {
-            wake_at = espid::power::next_daily_wake(
-                std::time(nullptr), g_power.wake_minute.load(std::memory_order_relaxed));
+        if (espid::app::clock_is_set()) {
+            wake_at = espid::power::next_weekly_wake(std::time(nullptr), wake_schedule());
         }
         if (sleep_now) {
             ESP_LOGI(kTag, "standby: sleep requested, going to sleep (timer wake %s)",
