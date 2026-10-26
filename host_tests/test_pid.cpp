@@ -389,4 +389,58 @@ TEST(PidController, IntegralBandKeepsTheHeldValueInTheOutput) {
     EXPECT_FLOAT_EQ(pid.integral_state(), 1.0F);
 }
 
+// ---------------- free integration band ----------------
+
+Controller::Config holding_plant(float free_band) {
+    Controller::Config c{};
+    c.kp                      = 18.0F;
+    c.ki                      = 0.2F;
+    c.output_min              = 0.0F;
+    c.output_max              = 100.0F;
+    c.integral_min            = -10.0F;
+    c.integral_max            = 15.0F;
+    c.sample_period_s         = 1.0F;
+    c.conditional_integration = true;
+    c.integral_band           = 2.0F;
+    c.free_integration_band   = free_band;
+    return c;
+}
+
+// Idle hunting of +-0.3 C around setpoint with a 2 % holding integral: the
+// output hits the 0 % floor on every excursion above setpoint.
+float integral_after_symmetric_hunting(float free_band) {
+    Controller pid(holding_plant(free_band));
+    // Seed the integral at the holding value.
+    for (int i = 0; i < 10; ++i) {
+        (void)pid.update(94.5F, 94.4F);  // +0.1 error: 18*0.1 + I, unsaturated
+    }
+    const float seeded = pid.integral_state();
+    for (int cycle = 0; cycle < 50; ++cycle) {
+        for (int i = 0; i < 30; ++i) (void)pid.update(94.5F, 94.2F);  // below: heats
+        for (int i = 0; i < 30; ++i) (void)pid.update(94.5F, 94.8F);  // above: floor
+    }
+    return pid.integral_state() - seeded;
+}
+
+TEST(PidController, ConditionalHoldRatchetsTheIntegralUpOnSymmetricHunting) {
+    // The defect being fixed: same time above and below, integral climbs.
+    EXPECT_GT(integral_after_symmetric_hunting(0.0F), 5.0F);
+}
+
+TEST(PidController, FreeIntegrationBandKeepsSymmetricHuntingCentred) {
+    EXPECT_NEAR(integral_after_symmetric_hunting(0.5F), 0.0F, 0.5F);
+}
+
+TEST(PidController, FreeIntegrationBandStillHoldsFurtherOut) {
+    Controller pid(holding_plant(0.5F));
+    (void)pid.update(94.5F, 94.4F);
+    const float i0 = pid.integral_state();
+    // 1.5 C above (post-steam cool-down through the band): output at the
+    // floor, error beyond the free band -> held as before.
+    for (int i = 0; i < 60; ++i) {
+        EXPECT_FLOAT_EQ(pid.update(94.5F, 96.0F), 0.0F);
+    }
+    EXPECT_FLOAT_EQ(pid.integral_state(), i0);
+}
+
 }  // namespace

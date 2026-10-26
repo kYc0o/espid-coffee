@@ -25,6 +25,13 @@
 //     to setpoint on stored heat with D braking the heater to 0 %:
 //     integrating that error would park the integral above the holding
 //     value. Saturation caused by P or I still lets the integral unwind.
+//   - Optional free-integration band (`free_integration_band`): within it
+//     the conditional-integration holds do not apply. A plant that holds
+//     with a few percent of output saturates at the floor on every small
+//     excursion above setpoint; holding the integral there but not below
+//     setpoint lets it ratchet up, and the loop settles with a standing
+//     offset above setpoint (heater, 2026-10: +0.35 C over weeks of idle).
+//     Inside a band that small, the error cannot wind the integral far.
 //   - Optional integral band (`integral_band`): the integrator only runs
 //     while |error| <= band. Far from setpoint the error says nothing
 //     about the holding output, only about a transient (a flush, a cold
@@ -54,6 +61,7 @@ class Controller {
         float d_filter_tau_s  = 0.0F;  // slope low-pass time constant; 0 = off
         bool  conditional_integration = false;
         float integral_band   = 0.0F;  // integrate only if |error| <= band; 0 = off
+        float free_integration_band = 0.0F;  // |error| <= band: no conditional hold; 0 = off
     };
 
     // Per-term breakdown of the most recent `update()`, for diagnostics.
@@ -121,7 +129,11 @@ class Controller {
         const bool d_brakes_into_sat =
             (out < cfg_.output_min && error > 0.0F && d_term < 0.0F) ||
             (out > cfg_.output_max && error < 0.0F && d_term > 0.0F);
-        if (cfg_.conditional_integration && (pushes_into_sat || d_brakes_into_sat)) {
+        const bool free_integration =
+            cfg_.free_integration_band > 0.0F &&
+            error <= cfg_.free_integration_band && error >= -cfg_.free_integration_band;
+        if (cfg_.conditional_integration && !free_integration &&
+            (pushes_into_sat || d_brakes_into_sat)) {
             integral = integral_;
             out      = p_term + integral + d_term;
         }
