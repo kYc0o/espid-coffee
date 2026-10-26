@@ -1528,12 +1528,40 @@ esp_err_t power_post_handler(httpd_req_t* req) {
                             cfg::power::kStandbyTimeoutMinMax, &sb_min)) {
         return reject("Invalid sb_min");
     }
+    // The page served before the weekly schedule posts one daily time
+    // (wk_en, wk_time) and no per-day fields: apply it to every day rather
+    // than read the missing boxes as "every day off".
+    char legacy_txt[8]{};
+    char probe[8]{};
+    char first_day_key[kWakeKeyLen];
+    std::snprintf(first_day_key, sizeof(first_day_key), kFormWakeTimeFmt, 0);
+    const bool legacy_form = !form_field(body, first_day_key, probe, sizeof(probe)) &&
+                             form_field(body, kCfgWakeTime, legacy_txt, sizeof(legacy_txt));
+    bool legacy_on = false;
+    int  legacy_minute = 0;
+    if (legacy_form) {
+        char en_txt[4]{};
+        if (!form_field(body, kCfgWakeEnabled, en_txt, sizeof(en_txt)) ||
+            !parse_flag(en_txt, &legacy_on) ||
+            !espid::power::parse_time_of_day(legacy_txt, &legacy_minute)) {
+            return reject("Invalid wk_en/wk_time");
+        }
+    }
+
     int  day_minute[espid::power::kDaysPerWeek];
     bool day_on[espid::power::kDaysPerWeek];
     char day_value[espid::power::kDaysPerWeek][10];  // "!" + HH:MM, with room the compiler can prove
     for (int d = 0; d < espid::power::kDaysPerWeek; ++d) {
         char key[kWakeKeyLen];
         char txt[8]{};
+        if (legacy_form) {
+            day_on[d]     = legacy_on;
+            day_minute[d] = legacy_minute;
+            char hhmm[8];
+            (void)espid::power::format_time_of_day(day_minute[d], hhmm, sizeof(hhmm));
+            std::snprintf(day_value[d], sizeof(day_value[d]), "%s%s", day_on[d] ? "" : "!", hhmm);
+            continue;
+        }
         std::snprintf(key, sizeof(key), kFormWakeOnFmt, d);
         day_on[d] = form_field(body, key, txt, sizeof(txt)) && std::strcmp(txt, "1") == 0;
         std::snprintf(key, sizeof(key), kFormWakeTimeFmt, d);
