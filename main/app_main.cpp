@@ -45,6 +45,7 @@
 #include "power/daily_wake.hpp"
 #include "power/time_of_day.hpp"
 #include "power/inactivity_timer.hpp"
+#include "power/standby_activity.hpp"
 #include "pump/refill_sequencer.hpp"
 #include "ui/machine_status.hpp"
 #include "pid/shot_thermal_stats.hpp"
@@ -3199,12 +3200,9 @@ std::uint64_t uptime_ms() noexcept {
     return static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
 }
 
-// Standby countdown and sleep sequence. Operator activity restarts the
-// countdown: a shot or a refill (for as long as it lasts), a steam switch
-// change, a settings save. The startup fill and a hawkbit poll or download
-// only defer the sleep while they run -- they are not the operator, and
-// the poll comes every 5 min, so letting it restart the countdown kept the
-// machine from ever sleeping on any timeout above 5 min. On expiry the
+// Standby countdown and sleep sequence. power::standby_effect() decides
+// what restarts the countdown (operator activity) and what only defers the
+// sleep (startup fill, hawkbit). On expiry, or a "sleep now" request, the
 // other tasks are parked (heater off, last MQTT record out, panel off)
 // before the chip enters deep sleep.
 void power_task(void* /*arg*/) {
@@ -3226,15 +3224,18 @@ void power_task(void* /*arg*/) {
 
         const bool steam = g_steam_active.load(std::memory_order_relaxed);
         const std::uint32_t activity = g_activity_seq.load(std::memory_order_acquire);
-        const bool operator_busy =
-            g_shot.running.load(std::memory_order_relaxed) ||
-            g_refill_switch.load(std::memory_order_acquire) ||
-            g_refill.state.load(std::memory_order_acquire) !=
-                static_cast<std::uint8_t>(espid::pump::RefillSequencer::State::kIdle);
-        const bool busy = operator_busy ||
-                          g_ota_busy.load(std::memory_order_acquire) ||
-                          !g_fill_complete.load(std::memory_order_acquire);
-        if (operator_busy || steam != steam_was || activity != activity_seen) {
+        espid::power::MachineActivity act{};
+        act.shot_running   = g_shot.running.load(std::memory_order_relaxed);
+        act.refill_running =
+            g_refill.state.load(std::memory_order_acquire) ==
+            static_cast<std::uint8_t>(espid::pump::RefillSequencer::State::kRunning);
+        act.steam_changed  = steam != steam_was;
+        act.settings_saved = activity != activity_seen;
+        act.fill_running   = !g_fill_complete.load(std::memory_order_acquire);
+        act.ota_busy       = g_ota_busy.load(std::memory_order_acquire);
+        const espid::power::StandbyEffect effect = espid::power::standby_effect(act);
+        const bool busy = effect.defer_sleep;
+        if (effect.restart_countdown) {
             timer.touch(now_ms);
         }
         steam_was     = steam;
