@@ -64,13 +64,23 @@
       </select>
     </label>
     <label>Idle time before sleep (min) <input name="sb_min" id="sb_min" type="number" min="5" max="720" required></label>
-    <label>Wake every day
-      <select name="wk_en" id="wk_en">
-        <option value="1">Yes</option>
-        <option value="0">No</option>
-      </select>
-    </label>
-    <label>Wake time (heater on) <input name="wk_time" id="wk_time" type="time" required></label>
+    <fieldset>
+      <legend>Wake (heater on) &mdash; tick the days to wake</legend>
+      <label class="wake-day"><input type="checkbox" name="wk_on1" id="wk_on1" value="1"> Monday
+        <input name="wk_t1" id="wk_t1" type="time"></label>
+      <label class="wake-day"><input type="checkbox" name="wk_on2" id="wk_on2" value="1"> Tuesday
+        <input name="wk_t2" id="wk_t2" type="time"></label>
+      <label class="wake-day"><input type="checkbox" name="wk_on3" id="wk_on3" value="1"> Wednesday
+        <input name="wk_t3" id="wk_t3" type="time"></label>
+      <label class="wake-day"><input type="checkbox" name="wk_on4" id="wk_on4" value="1"> Thursday
+        <input name="wk_t4" id="wk_t4" type="time"></label>
+      <label class="wake-day"><input type="checkbox" name="wk_on5" id="wk_on5" value="1"> Friday
+        <input name="wk_t5" id="wk_t5" type="time"></label>
+      <label class="wake-day"><input type="checkbox" name="wk_on6" id="wk_on6" value="1"> Saturday
+        <input name="wk_t6" id="wk_t6" type="time"></label>
+      <label class="wake-day"><input type="checkbox" name="wk_on0" id="wk_on0" value="1"> Sunday
+        <input name="wk_t0" id="wk_t0" type="time"></label>
+    </fieldset>
     <button type="submit">Save Standby</button>
   </form>
   <form method="POST" action="/power/sleep">

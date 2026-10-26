@@ -62,10 +62,17 @@
       return r.json();
     })
     .then(function (p) {
-      ['sb_en', 'sb_min', 'wk_en', 'wk_time'].forEach(function (f) {
+      ['sb_en', 'sb_min'].forEach(function (f) {
         var el = document.getElementById(f);
         if (el && p[f] !== undefined) { el.value = p[f]; }
       });
+      // Weekly wake: day index d follows tm_wday (0 = Sunday).
+      for (var d = 0; d < 7; d++) {
+        var t = document.getElementById('wk_t' + d);
+        var on = document.getElementById('wk_on' + d);
+        if (t && p['wk_t' + d] !== undefined) { t.value = p['wk_t' + d]; }
+        if (on) { on.checked = p['wk_on' + d] === '1'; }
+      }
       text('pw-clock', p.clock);
       text('pw-next', p.next_wake);
       text('pw-left', p.sb_en === '1'
