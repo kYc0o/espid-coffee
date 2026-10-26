@@ -290,7 +290,8 @@ goodbye screen and puts the panel to sleep (charge pump off) -- then calls
 through the sleep (heater SSR, valve, pump gate, TSIC supply); the two
 latching switches are armed as wake sources (`power::select_wake_pins`:
 off switches on ext1 "any high", one left on via ext0 when it turns off);
-an RTC timer wakes the machine at the daily wake time when SNTP has set
+an RTC timer wakes the machine at the next wake of the weekly schedule
+(`power::WeeklySchedule`: a time or none per weekday) when SNTP has set
 the clock since power-on. Every wake is a full reboot through the normal
 power-on path; `begin_boot()` drops the latches first and classifies the
 wake (`power::classify_wake`) by comparing the switch levels with those
@@ -454,7 +455,7 @@ If `get_idf` alias is unavailable in your shell:
 | 8     | Pump PSM (triac + ZC ISR) + 3-way valve control | ✅ done | fill guard + pressure PID |
 | 9     | Dual-HX711 scale (driver + `ScaleCore`) | 🚧 driver done | disabled pending calibration |
 | 10    | Safety over-temp latch + HawkBit A/B OTA | 🚧 partial | emergency-stop + DDI poll live; watchdog TBD |
-| 11    | Standby: deep sleep after inactivity + daily SNTP-timed wake | ✅ done | `power` component, `/power` settings |
+| 11    | Standby: deep sleep after inactivity + weekly SNTP-timed wake | ✅ done | `power` component, `/power` settings |
 
 Explicitly deferred: TLS for the local web UI, Bluetooth.
 
