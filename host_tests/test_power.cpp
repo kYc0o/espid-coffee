@@ -9,6 +9,7 @@
 #include "power/daily_wake.hpp"
 #include "power/inactivity_timer.hpp"
 #include "power/sleep_planner.hpp"
+#include "power/standby_activity.hpp"
 #include "power/time_of_day.hpp"
 #include "power/wake_pins.hpp"
 #include "power/wake_reason.hpp"
@@ -305,6 +306,56 @@ TEST(WakeReason, NoKnownSourceIsOther) {
 TEST(WakeReason, StableNames) {
     EXPECT_STREQ(espid::power::to_string(WakeReason::kSpurious), "spurious");
     EXPECT_STREQ(espid::power::to_string(WakeReason::kClockResync), "clock_resync");
+}
+
+// ---------------- standby_effect ----------------
+
+using espid::power::MachineActivity;
+using espid::power::standby_effect;
+
+TEST(StandbyActivity, IdleMachineNeitherRestartsNorDefers) {
+    const auto e = standby_effect(MachineActivity{});
+    EXPECT_FALSE(e.restart_countdown);
+    EXPECT_FALSE(e.defer_sleep);
+}
+
+TEST(StandbyActivity, OperatorActionsRestartTheCountdown) {
+    MachineActivity a{};
+    a.shot_running = true;
+    EXPECT_TRUE(standby_effect(a).restart_countdown);
+    a = MachineActivity{};
+    a.refill_running = true;
+    EXPECT_TRUE(standby_effect(a).restart_countdown);
+    a = MachineActivity{};
+    a.steam_changed = true;
+    EXPECT_TRUE(standby_effect(a).restart_countdown);
+    a = MachineActivity{};
+    a.settings_saved = true;
+    EXPECT_TRUE(standby_effect(a).restart_countdown);
+    EXPECT_TRUE(standby_effect(a).defer_sleep);
+}
+
+// 2026-10-02..05: a 5-minutely hawkbit poll restarting the countdown kept
+// the machine awake for good.
+TEST(StandbyActivity, BackgroundWorkOnlyDefers) {
+    MachineActivity a{};
+    a.ota_busy = true;
+    EXPECT_FALSE(standby_effect(a).restart_countdown);
+    EXPECT_TRUE(standby_effect(a).defer_sleep);
+    a = MachineActivity{};
+    a.fill_running = true;
+    EXPECT_FALSE(standby_effect(a).restart_countdown);
+    EXPECT_TRUE(standby_effect(a).defer_sleep);
+}
+
+// 2026-10-07 / -13: brew switch left on after a finished refill held the
+// machine awake 7 h and 11 h. A finished refill is not refill_running.
+TEST(StandbyActivity, FinishedRefillWithSwitchStillOnIsNotActivity) {
+    MachineActivity a{};
+    a.refill_running = false;  // finished, switch waiting to be released
+    const auto e = standby_effect(a);
+    EXPECT_FALSE(e.restart_countdown);
+    EXPECT_FALSE(e.defer_sleep);
 }
 
 }  // namespace
